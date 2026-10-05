@@ -2,6 +2,8 @@
 pub mod linux_x11;
 #[cfg(target_os = "linux")]
 pub use linux_x11::LinuxX11SelectionListener;
+pub mod hotkey;
+pub use hotkey::start_global_hotkey_listener;
 
 #[cfg(windows)]
 pub mod windows;
