@@ -1,3 +1,4 @@
+pub mod fonts;
 pub mod popup;
 pub mod state;
 
@@ -65,6 +66,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "yanxi-popup",
         native_options,
         Box::new(move |cc| {
+            fonts::configure_cjk_fonts(&cc.egui_ctx);
             if let Ok(mut lock) = state_app.lock() {
                 lock.ctx = Some(cc.egui_ctx.clone());
             }
