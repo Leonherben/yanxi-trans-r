@@ -81,6 +81,12 @@ yanxi-cli -p deepseek "attention is all you need"
 yanxi-cli --set-provider deepseek
 ```
 
+#### 桌面全局划词监听模式 (X11 零轮询)
+```bash
+# 启动后台划词监听，在任意程序划选文字即可自动弹出并翻译
+yanxi-cli -w
+```
+
 #### 终端交互 REPL 模式
 ```bash
 yanxi-cli -i
@@ -136,15 +142,18 @@ yanxi-cli --clear-cache
 
 ## 🗺️ 路线图 (Roadmap)
 
-- [x] **Phase 1: 核心引擎与 CLI (当前版本)**
+- [x] **Phase 1: 核心引擎与 CLI**
   - [x] 微软 Edge 免 Key 翻译与 Azure 官方专线双模支持
   - [x] OpenAI 兼容通用大模型 API 支持
   - [x] SQLite 本地缓存引擎与 Python 版双向兼容
   - [x] 学术论文 PDF 跨行断词自动修复
   - [x] 现代化 CLI 终端工具 (`yanxi-cli`)
-- [ ] **Phase 2: 桌面全局划词监听与选区捕获**
-  - [ ] Linux X11 PRIMARY 选区异步监听 (零轮询 CPU 占用)
-  - [ ] Windows 剪贴板自动监听支持
+- [x] **Phase 2: 桌面全局划词监听与选区捕获 (当前版本)**
+  - [x] 基于 X11 XFixes 协议的异步选区变动监听 (零轮询、零 CPU 占用)
+  - [x] 鼠标指针屏幕绝对坐标 `(x, y)` 毫秒级精准捕获
+  - [x] 左键连续拖拽物理消抖与重复选词抑制机制
+  - [x] Windows 跨平台选区抽象层
+  - [x] CLI 划词监听守护运行模式 (`yanxi-cli -w`)
 - [ ] **Phase 3: 超轻量悬浮翻译弹窗**
   - [ ] 基于 Webview / Tauri 2.0 构建现代化极简半透明弹窗
   - [ ] 内存开销控制在 20MB 以内

@@ -57,6 +57,10 @@ struct Cli {
     #[arg(long = "no-cache")]
     no_cache: bool,
 
+    /// 启动桌面全局划词监听守护模式
+    #[arg(short = 'w', long = "watch")]
+    watch: bool,
+
     /// 以 JSON 格式输出结果
     #[arg(long = "json")]
     json: bool,
@@ -317,6 +321,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } else {
             eprintln!("{} {}", "❌".red().bold(), msg.red());
         }
+        return Ok(());
+    }
+
+    // 4.5. 划词监听守护模式: --watch
+    if cli.watch {
+        println!(
+            "\n{}",
+            format!(
+                "=== 言蹊翻译 桌面划词监听守护模式 [Provider: {}, {} -> {}] ===",
+                active_provider.cyan().bold(),
+                source_lang.yellow(),
+                target_lang.yellow()
+            )
+            .bold()
+        );
+        println!(
+            "{}",
+            "🚀 后台划词监听器已启动 (X11 XFixes 零轮询驱动)，在任意窗口划选文字即可自动翻译 (按 Ctrl+C 退出)：\n".green()
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let listener = yanxi_trans_r::selection::create_selection_listener(
+            config.selection.debounce_ms,
+            1,
+            3000,
+        );
+        listener.start(tx)?;
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n👋 收到退出信号，正在停止划词监听器...");
+                listener.stop();
+            }
+            _ = async {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        yanxi_trans_r::selection::SelectionEvent::Selected { text, pos } => {
+                            println!(
+                                "{} 原文: {}",
+                                format!("🎯 [划词触发 @ ({}, {})]", pos.0, pos.1).magenta().bold(),
+                                format!("\"{}\"", text).yellow()
+                            );
+                            do_translate(
+                                &text,
+                                &source_lang,
+                                &target_lang,
+                                &active_provider,
+                                &config,
+                                &cache,
+                                cli.no_cache,
+                                cli.json,
+                            ).await;
+                        }
+                        yanxi_trans_r::selection::SelectionEvent::Cleared { .. } => {
+                            // 选区清空通知 (供 Phase 3 悬浮弹窗收起联动)
+                        }
+                    }
+                }
+            } => {}
+        }
+
+        println!("{} 划词监听守护进程已退出", "✅".green().bold());
         return Ok(());
     }
 

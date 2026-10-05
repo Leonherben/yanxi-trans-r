@@ -22,3 +22,6 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 sha2 = "0.10.8"
 tokio = { version = "1.43.0", features = ["full"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.14.0", features = ["all-extensions"] }
