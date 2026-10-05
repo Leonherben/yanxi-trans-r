@@ -12,6 +12,7 @@ pub struct PopupApp {
     show_key_plain: bool,
     last_visible: Option<bool>,
     is_resizing_splitter: bool,
+    initial_sized: bool,
 }
 
 impl PopupApp {
@@ -22,6 +23,7 @@ impl PopupApp {
             show_key_plain: false,
             last_visible: None,
             is_resizing_splitter: false,
+            initial_sized: false,
         }
     }
 }
@@ -49,18 +51,62 @@ impl eframe::App for PopupApp {
         if self.last_visible != Some(lock.is_visible) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(lock.is_visible));
             self.last_visible = Some(lock.is_visible);
+            if lock.is_visible {
+                #[cfg(target_os = "linux")]
+                if let Some(win) = lock.x11_window {
+                    let (s_w, s_h) = lock.screen_size;
+                    let win_w = if s_w > 2000.0 { 840 } else { 420 };
+                    let win_h = if s_h > 1200.0 { 520 } else { 260 };
+                    let (x, y) = lock.window_pos.unwrap_or((
+                        ((s_w - win_w as f32) / 2.0).max(10.0),
+                        ((s_h - win_h as f32) / 2.0).max(10.0),
+                    ));
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        crate::gui::move_resize_x11(win, x as i32, y as i32, win_w, win_h);
+                    });
+                }
+            }
         }
 
         if !lock.is_visible {
             return;
         }
 
-        // 处理鼠标划词时触发的位置更新与显隐控制
+        // 首次显示时强制发送紧凑尺寸命令，彻底杜绝部分 X11 窗口管理器将窗口默认最大化拉伸
+        if !self.initial_sized {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(420.0, 260.0)));
+            self.initial_sized = true;
+        }
+
+        // 处理鼠标划词或热键唤醒时触发的位置更新
         if lock.should_update_pos {
             if let Some(pos) = lock.window_pos {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(pos.0, pos.1)));
+                #[cfg(target_os = "linux")]
+                if let Some(win) = lock.x11_window {
+                    let (s_w, s_h) = lock.screen_size;
+                    let win_w = if s_w > 2000.0 { 840 } else { 420 };
+                    let win_h = if s_h > 1200.0 { 520 } else { 260 };
+                    crate::gui::move_resize_x11(win, pos.0 as i32, pos.1 as i32, win_w, win_h);
+                }
             }
             lock.should_update_pos = false;
+        }
+
+        // 视口尺寸主动纠偏：如果窗口管理器 Muffin 强行铺满屏幕 (宽度 > 500pt)，立即发送 EWMH 指令恢复紧凑窗口
+        if ui.max_rect().width() > 500.0 {
+            #[cfg(target_os = "linux")]
+            if let Some(win) = lock.x11_window {
+                let (s_w, s_h) = lock.screen_size;
+                let win_w = if s_w > 2000.0 { 840 } else { 420 };
+                let win_h = if s_h > 1200.0 { 520 } else { 260 };
+                let (x, y) = lock.window_pos.unwrap_or((
+                    ((s_w - win_w as f32) / 2.0).max(10.0),
+                    ((s_h - win_h as f32) / 2.0).max(10.0),
+                ));
+                crate::gui::move_resize_x11(win, x as i32, y as i32, win_w, win_h);
+            }
         }
 
         let is_pinned = lock.is_pinned;
@@ -78,69 +124,69 @@ impl eframe::App for PopupApp {
 
         let mut trigger_retranslate = false;
 
-        // 8向窗口缩放探测 (边缘 8px，角落 14px)
         let outer_rect = ui.max_rect();
-        if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
-            let margin = 8.0;
-            let corner = 14.0;
-            let left = pointer_pos.x <= outer_rect.min.x + margin;
-            let right = pointer_pos.x >= outer_rect.max.x - margin;
-            let top = pointer_pos.y <= outer_rect.min.y + margin;
-            let bottom = pointer_pos.y >= outer_rect.max.y - margin;
+        if !ui.ctx().any_popup_open() {
+            if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                let margin = 6.0;
+                let corner = 14.0;
+                let right = pointer_pos.x >= outer_rect.max.x - margin;
+                let bottom = pointer_pos.y >= outer_rect.max.y - margin;
+                let left = pointer_pos.y > 36.0 && pointer_pos.x <= outer_rect.min.x + margin;
 
-            let c_left = pointer_pos.x <= outer_rect.min.x + corner;
-            let c_right = pointer_pos.x >= outer_rect.max.x - corner;
-            let c_top = pointer_pos.y <= outer_rect.min.y + corner;
-            let c_bottom = pointer_pos.y >= outer_rect.max.y - corner;
+                let c_right = pointer_pos.x >= outer_rect.max.x - corner;
+                let c_bottom = pointer_pos.y >= outer_rect.max.y - corner;
+                let c_left = pointer_pos.x <= outer_rect.min.x + corner;
+                let c_top = pointer_pos.y <= outer_rect.min.y + 6.0;
 
-            let resize_dir = if c_top && c_left {
-                Some(egui::viewport::ResizeDirection::NorthWest)
-            } else if c_top && c_right {
-                Some(egui::viewport::ResizeDirection::NorthEast)
-            } else if c_bottom && c_left {
-                Some(egui::viewport::ResizeDirection::SouthWest)
-            } else if c_bottom && c_right {
-                Some(egui::viewport::ResizeDirection::SouthEast)
-            } else if top {
-                Some(egui::viewport::ResizeDirection::North)
-            } else if bottom {
-                Some(egui::viewport::ResizeDirection::South)
-            } else if left {
-                Some(egui::viewport::ResizeDirection::West)
-            } else if right {
-                Some(egui::viewport::ResizeDirection::East)
-            } else {
-                None
-            };
-
-            if let Some(dir) = resize_dir {
-                let cursor_icon = match dir {
-                    egui::viewport::ResizeDirection::NorthWest => egui::CursorIcon::ResizeNorthWest,
-                    egui::viewport::ResizeDirection::NorthEast => egui::CursorIcon::ResizeNorthEast,
-                    egui::viewport::ResizeDirection::SouthWest => egui::CursorIcon::ResizeSouthWest,
-                    egui::viewport::ResizeDirection::SouthEast => egui::CursorIcon::ResizeSouthEast,
-                    egui::viewport::ResizeDirection::North => egui::CursorIcon::ResizeNorth,
-                    egui::viewport::ResizeDirection::South => egui::CursorIcon::ResizeSouth,
-                    egui::viewport::ResizeDirection::West => egui::CursorIcon::ResizeWest,
-                    egui::viewport::ResizeDirection::East => egui::CursorIcon::ResizeEast,
+                let resize_dir = if c_bottom && c_right {
+                    Some(egui::viewport::ResizeDirection::SouthEast)
+                } else if c_bottom && c_left {
+                    Some(egui::viewport::ResizeDirection::SouthWest)
+                } else if c_top && pointer_pos.x <= outer_rect.min.x + 6.0 {
+                    Some(egui::viewport::ResizeDirection::NorthWest)
+                } else if c_top && pointer_pos.x >= outer_rect.max.x - 6.0 {
+                    Some(egui::viewport::ResizeDirection::NorthEast)
+                } else if bottom {
+                    Some(egui::viewport::ResizeDirection::South)
+                } else if right && pointer_pos.y > 36.0 {
+                    Some(egui::viewport::ResizeDirection::East)
+                } else if left {
+                    Some(egui::viewport::ResizeDirection::West)
+                } else {
+                    None
                 };
-                ui.ctx().set_cursor_icon(cursor_icon);
 
-                if ui.input(|i| i.pointer.any_pressed()) {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+                if let Some(dir) = resize_dir {
+                    let cursor_icon = match dir {
+                        egui::viewport::ResizeDirection::SouthEast => egui::CursorIcon::ResizeSouthEast,
+                        egui::viewport::ResizeDirection::SouthWest => egui::CursorIcon::ResizeSouthWest,
+                        egui::viewport::ResizeDirection::NorthEast => egui::CursorIcon::ResizeNorthEast,
+                        egui::viewport::ResizeDirection::NorthWest => egui::CursorIcon::ResizeNorthWest,
+                        egui::viewport::ResizeDirection::South => egui::CursorIcon::ResizeSouth,
+                        egui::viewport::ResizeDirection::East => egui::CursorIcon::ResizeEast,
+                        egui::viewport::ResizeDirection::West => egui::CursorIcon::ResizeWest,
+                        _ => egui::CursorIcon::Default,
+                    };
+                    ui.ctx().set_cursor_icon(cursor_icon);
+
+                    // 仅在按下瞬间发起一次系统拉伸指令，避免每帧重复请求引发 X11 混成器冲突与屏闪
+                    if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+                    }
                 }
             }
         }
+
 
         // ==================== 主悬浮窗外部浅色容器 ====================
         egui::Frame::new()
             .fill(egui::Color32::from_rgb(246, 248, 250)) // 优雅柔和的浅灰背景 (#f6f8fa)
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(208, 215, 222))) // 细致外边框 (#d0d7de)
             .corner_radius(12.0)
-            .inner_margin(10.0)
+            .inner_margin(8.0)
             .show(ui, |ui| {
                 // ==================== 1. 顶部操作栏 (Header Bar) ====================
-                let header_response = ui.horizontal(|ui| {
+                let _header_response = ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
 
                     // 1.1 提供商就地切换下拉选单 (微软翻译 / DeepSeek / OpenAI / 智谱 / Ollama)
@@ -156,20 +202,20 @@ impl eframe::App for PopupApp {
                             }
                         });
 
-                    // 1.2 语言方向切换 (自动 ⇄ 中)
-                    let lang_text = format!("{} ⇄ {}", lang_display_short(&source_lang), lang_display_short(&target_lang));
+                    // 1.2 语言方向切换 (自动 → 中)
+                    let lang_text = format!("{} → {}", lang_display_short(&source_lang), lang_display_short(&target_lang));
                     egui::ComboBox::from_id_salt("header_lang_select")
                         .selected_text(egui::RichText::new(lang_text).size(12.0).color(egui::Color32::from_rgb(36, 41, 47)))
                         .show_ui(ui, |ui| {
                             let common_langs = [
                                 ("zh-CN", "简体中文"),
-                                ("en", "English"),
-                                ("ja", "日本語"),
-                                ("ko", "한국어"),
-                                ("fr", "Français"),
-                                ("de", "Deutsch"),
-                                ("es", "Español"),
-                                ("ru", "Русский"),
+                                ("en", "英语 (English)"),
+                                ("ja", "日语 (日本語)"),
+                                ("ko", "韩语 (Korean)"),
+                                ("fr", "法语 (Français)"),
+                                ("de", "德语 (Deutsch)"),
+                                ("es", "西语 (Español)"),
+                                ("ru", "俄语 (Русский)"),
                             ];
                             for (code, name) in common_langs {
                                 if ui.selectable_value(&mut target_lang, code.to_string(), name).clicked() {
@@ -177,7 +223,7 @@ impl eframe::App for PopupApp {
                                 }
                             }
                             ui.separator();
-                            if ui.button("⇄ 互换语种").clicked() {
+                            if ui.button("互换语种").clicked() {
                                 if source_lang == "auto" {
                                     source_lang = target_lang.clone();
                                     target_lang = "en".into();
@@ -189,10 +235,13 @@ impl eframe::App for PopupApp {
                         });
 
                     // 弹性空白填充，将右侧控制按钮顶至右端
+                    // 弹性空白填充区：仅在该空白区按住拖拽时，才拖动窗口，杜绝与下拉框点击发生冲突
                     let available_w = ui.available_width();
-                    let right_tools_w = 210.0;
-                    if available_w > right_tools_w {
-                        ui.add_space(available_w - right_tools_w);
+                    let right_tools_w = 200.0;
+                    let spacer_w = (available_w - right_tools_w).max(8.0);
+                    let (_spacer_rect, spacer_resp) = ui.allocate_exact_size(egui::vec2(spacer_w, 24.0), egui::Sense::drag());
+                    if spacer_resp.dragged() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
 
                     // 1.3 取词模式切换 (划选即翻译 / 伴随阅读 / 手动模式)
@@ -247,9 +296,9 @@ impl eframe::App for PopupApp {
                         }
                     }
 
-                    // 1.6 ✕ 关闭收起按钮
+                    // 1.6 × 关闭收起按钮
                     if ui
-                        .button(egui::RichText::new("✕").size(13.0).color(egui::Color32::from_rgb(87, 96, 106)))
+                        .button(egui::RichText::new("×").size(15.0).color(egui::Color32::from_rgb(87, 96, 106)))
                         .on_hover_text("收起浮窗 (后台常驻，按 Alt+Q 随时呼出)")
                         .clicked()
                     {
@@ -258,12 +307,7 @@ impl eframe::App for PopupApp {
                     }
                 });
 
-                // 允许按住标题栏拖动整个窗口
-                if header_response.response.interact(egui::Sense::drag()).dragged() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
-
-                ui.add_space(6.0);
+                ui.add_space(4.0);
 
                 // 状态变动落盘
                 if active_provider != lock.active_provider {
@@ -438,9 +482,9 @@ impl eframe::App for PopupApp {
                 }
 
                 // ==================== 3. 主内容区域 (上下两张卡片 + 中间 Splitter) ====================
-                let total_avail_h = ui.available_height().max(160.0);
-                let splitter_h = 8.0;
-                let cards_avail_h = (total_avail_h - splitter_h).max(140.0);
+                let total_avail_h = ui.available_height().max(140.0);
+                let splitter_h = 6.0;
+                let cards_avail_h = (total_avail_h - splitter_h).max(120.0);
 
                 let ratio = lock.splitter_ratio.clamp(0.25, 0.75);
                 let card1_target_h = cards_avail_h * ratio;
@@ -451,9 +495,9 @@ impl eframe::App for PopupApp {
                     .fill(egui::Color32::WHITE)
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(225, 228, 232)))
                     .corner_radius(8.0)
-                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
-                        ui.set_height(card1_target_h.max(60.0));
+                        ui.set_height(card1_target_h.max(50.0));
 
                         // 多行文本编辑框
                         let text_edit_response = ui.add(
@@ -587,15 +631,15 @@ impl eframe::App for PopupApp {
                     .fill(egui::Color32::WHITE)
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(225, 228, 232)))
                     .corner_radius(8.0)
-                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
-                        ui.set_height(card2_target_h.max(70.0));
+                        ui.set_height(card2_target_h.max(55.0));
 
                         // 内容展示区
                         egui::ScrollArea::vertical()
                             .id_salt("translation_content_scroll")
                             .auto_shrink([false, false])
-                            .max_height(card2_target_h - 32.0)
+                            .max_height(card2_target_h - 26.0)
                             .show(ui, |ui| {
                                 match &status {
                                     TranslationStatus::Idle => {

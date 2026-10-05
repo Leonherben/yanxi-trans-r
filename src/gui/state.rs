@@ -71,6 +71,8 @@ pub struct SharedPopupState {
     pub ctx: Option<eframe::egui::Context>,
     pub tx_command: Option<UnboundedSender<GuiCommand>>,
     pub tx_hotkey: Option<std::sync::mpsc::Sender<String>>,
+    pub x11_window: Option<u32>,
+    pub screen_size: (f32, f32),
 }
 
 impl SharedPopupState {
@@ -117,6 +119,8 @@ impl SharedPopupState {
             ctx: None,
             tx_command: None,
             tx_hotkey: None,
+            x11_window: None,
+            screen_size: (1920.0, 1080.0),
         }
     }
 
@@ -184,12 +188,16 @@ impl SharedPopupState {
     }
 
     /// 根据光标绝对坐标计算浮窗最佳显示位置，并做屏幕防溢出碰撞检测
-    pub fn compute_target_pos(cursor_x: i32, cursor_y: i32, win_w: f32, win_h: f32) -> (f32, f32) {
+    pub fn compute_target_pos(
+        cursor_x: i32,
+        cursor_y: i32,
+        win_w: f32,
+        win_h: f32,
+        screen_w: f32,
+        screen_h: f32,
+    ) -> (f32, f32) {
         let mut x = cursor_x as f32 + 12.0;
         let mut y = cursor_y as f32 + 16.0;
-
-        let screen_w = 1920.0;
-        let screen_h = 1080.0;
 
         if x + win_w > screen_w - 20.0 {
             x = (cursor_x as f32 - win_w - 12.0).max(10.0);
