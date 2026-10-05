@@ -1,0 +1,24 @@
+[package]
+name = "yanxi-trans-r"
+version = "0.1.0"
+edition = "2024"
+authors = ["LeonHerben <herberten16@gmail.com>"]
+description = "High-performance, ultra-lightweight selection translation tool in Rust"
+license = "MIT"
+repository = "https://github.com/LeonHerben/yanxi-trans-r"
+
+[[bin]]
+name = "yanxi-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+colored = "2.1.0"
+dirs = "5.0.1"
+regex = "1.11.1"
+reqwest = { version = "0.12.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+rusqlite = { version = "0.33.0", features = ["bundled"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+sha2 = "0.10.8"
+tokio = { version = "1.43.0", features = ["full"] }

@@ -1,0 +1,66 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  check:
+    name: Check & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cargo Check
+        run: cargo check --verbose
+      - name: Cargo Test
+        run: cargo test --verbose
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: yanxi-cli
+            asset_name: yanxi-cli-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: yanxi-cli.exe
+            asset_name: yanxi-cli-windows-x86_64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Release Binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare Artifact (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          strip target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} ./${{ matrix.asset_name }}
+
+      - name: Prepare Artifact (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Copy-Item target/${{ matrix.target }}/release/${{ matrix.binary_name }} ./${{ matrix.asset_name }}
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
