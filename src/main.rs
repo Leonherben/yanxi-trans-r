@@ -61,6 +61,10 @@ struct Cli {
     #[arg(short = 'w', long = "watch")]
     watch: bool,
 
+    /// 启动桌面极简悬浮翻译弹窗 (GUI 模式)
+    #[arg(short = 'g', long = "gui")]
+    gui: bool,
+
     /// 以 JSON 格式输出结果
     #[arg(long = "json")]
     json: bool,
@@ -204,6 +208,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cache.clear()?;
         println!("{} 本地翻译缓存数据库已清空", "✅".green().bold());
         return Ok(());
+    }
+
+    // 0.5. 启动桌面悬浮窗模式: --gui
+    if cli.gui {
+        println!("🚀 正在启动言蹊翻译桌面极简悬浮窗 (GUI 模式)...");
+        return yanxi_trans_r::gui::run_gui();
     }
 
     // 1. 设置默认 Provider

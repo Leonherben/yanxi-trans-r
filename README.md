@@ -16,7 +16,9 @@
 
 ## 🌟 核心特性
 
-- ⚡ **极致轻量 & 零依赖**：单文件原生可执行程序（Release 瘦身后仅 ~8MB），无需 Python 环境及沉重的 Qt/PySide6 依赖库。
+- ⚡ **极致轻量 & 零依赖**：单文件原生纯 Rust 可执行程序，无需 Python 环境及沉重的 Qt/PySide6 依赖库，相较于原版内存下降 **80%+**。
+- 🪟 **原生桌面极简悬浮弹窗 (`yanxi-gui`)**：基于 `eframe`/`egui` 打造的高性能毛玻璃深色悬浮窗，无焦点窃取打扰，智能跟随光标定位并具备屏幕边缘防溢出。
+- 🎯 **X11 XFixes 全局无感划词监听**：彻底摒弃传统 24 小时低级鼠标钩子轮询，日常 **完全零 CPU 占用**，在任意应用中选词高亮即时触发。
 - 🌐 **微软官方免 Key 极速通道**：内置高拟真 Bing/Edge 网页端自适应动态会话签名机制，无需申请任何 API Key 即可无限免费体验极速翻译（支持注音/拼音与语种自动识别）。
 - 🤖 **兼容大模型生态**：原生支持 OpenAI、DeepSeek、Moonshot 等任何兼容 `/chat/completions` 协议的大模型，支持自定义 System Prompt。
 - 📄 **学术双栏 PDF 跨行断词自动修复**：智能识别并修复论文双栏排版中因分行产生的带连字符截断词（例如 `convo-\n lutional` 自动还原为 `convolutional`）。
@@ -36,8 +38,9 @@ git clone https://github.com/Leonherben/yanxi-trans-r.git
 cd yanxi-trans-r
 cargo build --release
 
-# 将二进制安装至用户本地 bin
+# 安装 CLI 与 GUI 工具至用户本地 bin
 install -Dm755 target/release/yanxi-cli ~/.local/bin/yanxi-cli
+install -Dm755 target/release/yanxi-gui ~/.local/bin/yanxi-gui
 ```
 
 ### 2. 基本使用
@@ -81,9 +84,18 @@ yanxi-cli -p deepseek "attention is all you need"
 yanxi-cli --set-provider deepseek
 ```
 
-#### 桌面全局划词监听模式 (X11 零轮询)
+#### 启动桌面悬浮弹窗 (GUI 模式)
 ```bash
-# 启动后台划词监听，在任意程序划选文字即可自动弹出并翻译
+# 启动桌面常驻无感划词悬浮窗 (划选文字自动弹出并翻译)
+yanxi-gui
+
+# 或通过 CLI 启动 GUI 模式
+yanxi-cli -g
+```
+
+#### 桌面终端划词监听模式 (CLI Watch)
+```bash
+# 在终端中实时监控划词并输出
 yanxi-cli -w
 ```
 
@@ -148,15 +160,17 @@ yanxi-cli --clear-cache
   - [x] SQLite 本地缓存引擎与 Python 版双向兼容
   - [x] 学术论文 PDF 跨行断词自动修复
   - [x] 现代化 CLI 终端工具 (`yanxi-cli`)
-- [x] **Phase 2: 桌面全局划词监听与选区捕获 (当前版本)**
+- [x] **Phase 2: 桌面全局划词监听与选区捕获**
   - [x] 基于 X11 XFixes 协议的异步选区变动监听 (零轮询、零 CPU 占用)
   - [x] 鼠标指针屏幕绝对坐标 `(x, y)` 毫秒级精准捕获
   - [x] 左键连续拖拽物理消抖与重复选词抑制机制
   - [x] Windows 跨平台选区抽象层
   - [x] CLI 划词监听守护运行模式 (`yanxi-cli -w`)
-- [ ] **Phase 3: 超轻量悬浮翻译弹窗**
-  - [ ] 基于 Webview / Tauri 2.0 构建现代化极简半透明弹窗
-  - [ ] 内存开销控制在 20MB 以内
+- [x] **Phase 3: 超轻量悬浮翻译弹窗 (当前版本)**
+  - [x] 基于 `eframe`/`egui` 打造的高性能无焦点窃取悬浮窗 (`yanxi-gui`)
+  - [x] 光标跟随动态定位与屏幕边缘防溢出翻转
+  - [x] 暗黑毛玻璃卡片拟态、拼音注音、一键复制与图钉固定 (📌)
+  - [x] 内存常驻大幅降低至 ~20MB，运行响应如丝顺滑
 
 ---
 

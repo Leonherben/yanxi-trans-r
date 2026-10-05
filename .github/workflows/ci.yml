@@ -30,12 +30,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary_name: yanxi-cli
-            asset_name: yanxi-cli-linux-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary_name: yanxi-cli.exe
-            asset_name: yanxi-cli-windows-x86_64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -50,17 +46,22 @@ jobs:
       - name: Prepare Artifact (Linux)
         if: runner.os == 'Linux'
         run: |
-          strip target/${{ matrix.target }}/release/${{ matrix.binary_name }}
-          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} ./${{ matrix.asset_name }}
+          strip target/${{ matrix.target }}/release/yanxi-cli
+          strip target/${{ matrix.target }}/release/yanxi-gui
+          cp target/${{ matrix.target }}/release/yanxi-cli ./yanxi-cli-linux-x86_64
+          cp target/${{ matrix.target }}/release/yanxi-gui ./yanxi-gui-linux-x86_64
 
       - name: Prepare Artifact (Windows)
         if: runner.os == 'Windows'
         run: |
-          Copy-Item target/${{ matrix.target }}/release/${{ matrix.binary_name }} ./${{ matrix.asset_name }}
+          Copy-Item target/${{ matrix.target }}/release/yanxi-cli.exe ./yanxi-cli-windows-x86_64.exe
+          Copy-Item target/${{ matrix.target }}/release/yanxi-gui.exe ./yanxi-gui-windows-x86_64.exe
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset_name }}
+          files: |
+            yanxi-cli-*
+            yanxi-gui-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

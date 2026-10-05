@@ -64,7 +64,7 @@ impl TranslationRequest {
 }
 
 /// 翻译结果实体
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranslationResult {
     pub original_text: String,
     pub translated_text: String,
