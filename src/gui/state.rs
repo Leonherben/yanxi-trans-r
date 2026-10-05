@@ -44,6 +44,7 @@ pub struct SharedPopupState {
     pub status: TranslationStatus,
     pub cursor_pos: (i32, i32),
     pub window_pos: Option<(f32, f32)>,
+    pub window_size: (f32, f32),
     pub should_update_pos: bool,
 
     // 原文编辑与查词
@@ -100,6 +101,7 @@ impl SharedPopupState {
             status: TranslationStatus::Idle,
             cursor_pos: (0, 0),
             window_pos: None,
+            window_size: (1000.0, 640.0),
             should_update_pos: false,
             edit_text: String::new(),
             active_provider: active_p.clone(),

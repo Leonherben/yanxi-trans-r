@@ -20,29 +20,46 @@ use x11rb::connection::Connection;
 use x11rb::wrapper::ConnectionExt as _;
 
 #[cfg(target_os = "linux")]
+thread_local! {
+    static X11_CONN: std::cell::RefCell<Option<(x11rb::rust_connection::RustConnection, usize, u32)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(target_os = "linux")]
 pub fn move_resize_x11(win: u32, x: i32, y: i32, w: u32, h: u32) {
-    if let Ok((conn, screen_num)) = x11rb::connect(None) {
-        use x11rb::protocol::xproto::{ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask};
-        let root = conn.setup().roots[screen_num].root;
-        if let Ok(cookie) = conn.intern_atom(false, b"_NET_MOVERESIZE_WINDOW") {
-            if let Ok(atom) = cookie.reply() {
-                let flags = 0x0F01u32; // NorthWest + x + y + w + h
-                let data = [flags, x.max(0) as u32, y.max(0) as u32, w, h];
-                let event = ClientMessageEvent {
-                    response_type: x11rb::protocol::xproto::CLIENT_MESSAGE_EVENT,
-                    format: 32,
-                    sequence: 0,
-                    window: win,
-                    type_: atom.atom,
-                    data: ClientMessageData::from(data),
+    X11_CONN.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if opt.is_none() {
+            if let Ok((conn, screen_num)) = x11rb::connect(None) {
+                use x11rb::protocol::xproto::ConnectionExt;
+                let atom_val = if let Ok(cookie) = conn.intern_atom(false, b"_NET_MOVERESIZE_WINDOW") {
+                    cookie.reply().map(|r| r.atom).ok()
+                } else {
+                    None
                 };
-                if let Ok(cookie) = conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, event) {
-                    let _ = cookie.check();
-                    let _ = conn.flush();
+                if let Some(atom) = atom_val {
+                    *opt = Some((conn, screen_num, atom));
                 }
             }
         }
-    }
+        if let Some((conn, screen_num, atom)) = opt.as_ref() {
+            use x11rb::protocol::xproto::{ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask};
+            let root = conn.setup().roots[*screen_num].root;
+            let flags = 0x0F01u32; // NorthWest + x + y + w + h
+            let data = [flags, x.max(0) as u32, y.max(0) as u32, w, h];
+            let event = ClientMessageEvent {
+                response_type: x11rb::protocol::xproto::CLIENT_MESSAGE_EVENT,
+                format: 32,
+                sequence: 0,
+                window: win,
+                type_: *atom,
+                data: ClientMessageData::from(data),
+            };
+            if let Ok(cookie) = conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, event) {
+                let _ = cookie.check();
+                let _ = conn.flush();
+            }
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -226,16 +243,18 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 );
                                 let _ = conn.flush();
 
-                                if let Ok(mut lock) = state_x11.lock() {
-                                    lock.x11_window = Some(win);
-                                    lock.screen_size = (screen_w, screen_h);
-                                }
-
                                 let init_w = if screen_w > 2000.0 { 1000 } else { 500 };
                                 let init_h = if screen_h > 1200.0 { 640 } else { 320 };
                                 let init_x = ((screen_w - init_w as f32) / 2.0).max(10.0) as i32;
                                 let init_y = ((screen_h - init_h as f32) / 2.0).max(10.0) as i32;
                                 move_resize_x11(win, init_x, init_y, init_w, init_h);
+
+                                if let Ok(mut lock) = state_x11.lock() {
+                                    lock.x11_window = Some(win);
+                                    lock.screen_size = (screen_w, screen_h);
+                                    lock.window_pos = Some((init_x as f32, init_y as f32));
+                                    lock.window_size = (init_w as f32, init_h as f32);
+                                }
 
                                 println!("[Yanxi GUI] 🪟 X11 浮窗属性增强就绪: Utility + SkipTaskbar + SkipPager + Above, 初始尺寸: {}x{}", init_w, init_h);
                                 return;

@@ -13,6 +13,7 @@ pub struct PopupApp {
     last_visible: Option<bool>,
     is_resizing_splitter: bool,
     initial_sized: bool,
+    active_resize: Option<egui::viewport::ResizeDirection>,
 }
 
 impl PopupApp {
@@ -24,6 +25,7 @@ impl PopupApp {
             last_visible: None,
             is_resizing_splitter: false,
             initial_sized: false,
+            active_resize: None,
         }
     }
 }
@@ -132,7 +134,92 @@ impl eframe::App for PopupApp {
 
         let outer_rect = ui.max_rect();
         if !ui.ctx().any_popup_open() {
-            if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
+            // 1. 如果当前正在通过四角/边缘拉伸缩放 (软件直控，松手立停，绝不锁死鼠标)
+            if let Some(dir) = self.active_resize {
+                if ui.input(|i| i.pointer.primary_down()) {
+                    let cursor_icon = match dir {
+                        egui::viewport::ResizeDirection::SouthEast => egui::CursorIcon::ResizeSouthEast,
+                        egui::viewport::ResizeDirection::SouthWest => egui::CursorIcon::ResizeSouthWest,
+                        egui::viewport::ResizeDirection::NorthEast => egui::CursorIcon::ResizeNorthEast,
+                        egui::viewport::ResizeDirection::NorthWest => egui::CursorIcon::ResizeNorthWest,
+                        egui::viewport::ResizeDirection::South => egui::CursorIcon::ResizeSouth,
+                        egui::viewport::ResizeDirection::East => egui::CursorIcon::ResizeEast,
+                        egui::viewport::ResizeDirection::West => egui::CursorIcon::ResizeWest,
+                        _ => egui::CursorIcon::Default,
+                    };
+                    ui.ctx().set_cursor_icon(cursor_icon);
+
+                    let delta = ui.input(|i| i.pointer.delta());
+                    if delta.length_sq() > 0.0 {
+                        let ppp = ui.ctx().pixels_per_point();
+                        #[cfg(target_os = "linux")]
+                        if let Some(win) = lock.x11_window {
+                            let (mut cur_x, mut cur_y) = if let Some(pos) = lock.window_pos {
+                                pos
+                            } else if let Some((cx, cy)) = crate::gui::get_window_position_x11(win) {
+                                (cx as f32, cy as f32)
+                            } else {
+                                (0.0, 0.0)
+                            };
+                            let (mut cur_w, mut cur_h) = lock.window_size;
+                            let min_w = 380.0 * ppp;
+                            let min_h = 220.0 * ppp;
+
+                            let dx = delta.x * ppp;
+                            let dy = delta.y * ppp;
+
+                            match dir {
+                                egui::viewport::ResizeDirection::SouthEast => {
+                                    cur_w = (cur_w + dx).max(min_w);
+                                    cur_h = (cur_h + dy).max(min_h);
+                                }
+                                egui::viewport::ResizeDirection::SouthWest => {
+                                    let new_w = (cur_w - dx).max(min_w);
+                                    cur_x += cur_w - new_w;
+                                    cur_w = new_w;
+                                    cur_h = (cur_h + dy).max(min_h);
+                                }
+                                egui::viewport::ResizeDirection::NorthEast => {
+                                    cur_w = (cur_w + dx).max(min_w);
+                                    let new_h = (cur_h - dy).max(min_h);
+                                    cur_y += cur_h - new_h;
+                                    cur_h = new_h;
+                                }
+                                egui::viewport::ResizeDirection::NorthWest => {
+                                    let new_w = (cur_w - dx).max(min_w);
+                                    cur_x += cur_w - new_w;
+                                    cur_w = new_w;
+                                    let new_h = (cur_h - dy).max(min_h);
+                                    cur_y += cur_h - new_h;
+                                    cur_h = new_h;
+                                }
+                                egui::viewport::ResizeDirection::South => {
+                                    cur_h = (cur_h + dy).max(min_h);
+                                }
+                                egui::viewport::ResizeDirection::East => {
+                                    cur_w = (cur_w + dx).max(min_w);
+                                }
+                                egui::viewport::ResizeDirection::West => {
+                                    let new_w = (cur_w - dx).max(min_w);
+                                    cur_x += cur_w - new_w;
+                                    cur_w = new_w;
+                                }
+                                _ => {}
+                            }
+
+                            lock.window_pos = Some((cur_x, cur_y));
+                            lock.window_size = (cur_w, cur_h);
+                            crate::gui::move_resize_x11(win, cur_x as i32, cur_y as i32, cur_w as u32, cur_h as u32);
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                                egui::vec2(cur_w / ppp, cur_h / ppp)
+                            ));
+                        }
+                    }
+                } else {
+                    self.active_resize = None;
+                }
+            } else if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                // 2. 检测边缘与四角悬浮和点击 (软件直控，绝不调用系统级 BeginResize，杜绝 X11 指针抓手死锁)
                 let margin = 6.0;
                 let corner = 14.0;
                 let right = pointer_pos.x >= outer_rect.max.x - margin;
@@ -175,9 +262,8 @@ impl eframe::App for PopupApp {
                     };
                     ui.ctx().set_cursor_icon(cursor_icon);
 
-                    // 仅在按下瞬间发起一次系统拉伸指令，避免每帧重复请求引发 X11 混成器冲突与屏闪
-                    if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+                    if ui.input(|i| i.pointer.primary_pressed()) {
+                        self.active_resize = Some(dir);
                     }
                 }
             }
@@ -330,7 +416,7 @@ impl eframe::App for PopupApp {
                                 ui.selectable_value(&mut selection_mode, SelectionMode::Manual, "手动模式 (仅按快捷键弹窗)");
                             });
 
-                        // 1.3.5 中间弹性拖拽区 (占满剩余宽度，静默拖拽，不切换光标图标，杜绝跳动)
+                        // 1.3.5 中间弹性拖拽区 (软件直接计算位移更新窗口坐标，绝不调用系统级 StartDrag，松手立停)
                         let remaining_w = ui.available_width();
                         if remaining_w > 4.0 {
                             let (_drag_rect, drag_resp) = ui.allocate_exact_size(
@@ -338,13 +424,26 @@ impl eframe::App for PopupApp {
                                 egui::Sense::drag(),
                             );
                             if drag_resp.dragged() {
-                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                            }
-                            if drag_resp.drag_stopped() {
-                                #[cfg(target_os = "linux")]
-                                if let Some(win) = lock.x11_window {
-                                    if let Some((cx, cy)) = crate::gui::get_window_position_x11(win) {
-                                        lock.window_pos = Some((cx as f32, cy as f32));
+                                let delta = drag_resp.drag_delta();
+                                if delta.length_sq() > 0.0 {
+                                    let ppp = ui.ctx().pixels_per_point();
+                                    #[cfg(target_os = "linux")]
+                                    if let Some(win) = lock.x11_window {
+                                        let (cur_x, cur_y) = if let Some(pos) = lock.window_pos {
+                                            pos
+                                        } else if let Some((cx, cy)) = crate::gui::get_window_position_x11(win) {
+                                            (cx as f32, cy as f32)
+                                        } else {
+                                            (0.0, 0.0)
+                                        };
+                                        let new_x = (cur_x + delta.x * ppp).round();
+                                        let new_y = (cur_y + delta.y * ppp).round();
+                                        lock.window_pos = Some((new_x, new_y));
+                                        let (win_w, win_h) = lock.window_size;
+                                        crate::gui::move_resize_x11(win, new_x as i32, new_y as i32, win_w as u32, win_h as u32);
+                                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                                            egui::pos2(new_x / ppp, new_y / ppp)
+                                        ));
                                     }
                                 }
                             }
