@@ -45,7 +45,13 @@ pub struct SelectionConfig {
     pub auto_popup_only_when_visible: bool,
     #[serde(default)]
     pub mode: SelectionMode,
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
     pub debounce_ms: u64,
+}
+
+fn default_hotkey() -> String {
+    "alt+q".into()
 }
 
 impl Default for SelectionConfig {
@@ -55,6 +61,7 @@ impl Default for SelectionConfig {
             auto_popup_on_selection: true,
             auto_popup_only_when_visible: true,
             mode: SelectionMode::Companion,
+            hotkey: default_hotkey(),
             debounce_ms: 150,
         }
     }
@@ -91,6 +98,24 @@ impl SelectionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UIConfig {
+    #[serde(default = "default_splitter_ratio")]
+    pub splitter_ratio: f32,
+}
+
+fn default_splitter_ratio() -> f32 {
+    0.45
+}
+
+impl Default for UIConfig {
+    fn default() -> Self {
+        Self {
+            splitter_ratio: default_splitter_ratio(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub active_provider: String,
     #[serde(default = "default_source_lang")]
@@ -98,6 +123,8 @@ pub struct AppConfig {
     pub target_lang: String,
     pub providers: HashMap<String, ProviderConfig>,
     pub selection: SelectionConfig,
+    #[serde(default)]
+    pub ui: UIConfig,
 }
 
 fn default_source_lang() -> String {
@@ -184,6 +211,7 @@ impl Default for AppConfig {
             target_lang: "zh-CN".into(),
             providers,
             selection: SelectionConfig::default(),
+            ui: UIConfig::default(),
         }
     }
 }
@@ -238,3 +266,19 @@ impl AppConfig {
             .unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = AppConfig::default();
+        assert_eq!(config.selection.hotkey, "alt+q");
+        assert_eq!(config.ui.splitter_ratio, 0.45);
+        assert_eq!(config.active_provider, "microsoft");
+        assert_eq!(config.source_lang, "auto");
+        assert_eq!(config.target_lang, "zh-CN");
+    }
+}
+

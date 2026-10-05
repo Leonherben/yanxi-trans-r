@@ -5,3 +5,4 @@ pub mod models;
 pub mod selection;
 pub mod single_instance;
 pub mod translator;
+pub mod tts;

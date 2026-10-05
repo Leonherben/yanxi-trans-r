@@ -2,6 +2,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 use crate::config::{AppConfig, ProviderConfig, SelectionMode};
 use crate::models::TranslationResult;
+use crate::tts::Accent;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranslationStatus {
@@ -27,6 +28,10 @@ pub enum GuiCommand {
     TestProvider {
         provider_name: String,
         provider_config: ProviderConfig,
+    },
+    PlayTts {
+        text: String,
+        accent: Accent,
     },
     SaveConfig(AppConfig),
 }
@@ -56,13 +61,16 @@ pub struct SharedPopupState {
     pub settings_api_key: String,
     pub settings_base_url: String,
     pub settings_model: String,
+    pub settings_hotkey: String,
     pub test_feedback: Option<(bool, String)>,
 
     // 交互与显示
+    pub splitter_ratio: f32,
     pub only_translation: bool,
     pub copy_feedback_time: Option<Instant>,
     pub ctx: Option<eframe::egui::Context>,
     pub tx_command: Option<UnboundedSender<GuiCommand>>,
+    pub tx_hotkey: Option<std::sync::mpsc::Sender<String>>,
 }
 
 impl SharedPopupState {
@@ -77,7 +85,6 @@ impl SharedPopupState {
             "zhipu".to_string(),
             "custom".to_string(),
         ];
-        // 补全任何自定义的 provider
         for k in config.providers.keys() {
             if !available.contains(k) {
                 available.push(k.clone());
@@ -102,11 +109,14 @@ impl SharedPopupState {
             settings_api_key: p_cfg.api_key,
             settings_base_url: p_cfg.base_url,
             settings_model: p_cfg.model,
+            settings_hotkey: config.selection.hotkey.clone(),
             test_feedback: None,
+            splitter_ratio: config.ui.splitter_ratio.clamp(0.2, 0.8),
             only_translation: false,
             copy_feedback_time: None,
             ctx: None,
             tx_command: None,
+            tx_hotkey: None,
         }
     }
 
@@ -131,6 +141,27 @@ impl SharedPopupState {
         }
     }
 
+    pub fn play_tts(&self, text: &str, accent: Accent) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Some(ref tx) = self.tx_command {
+            let _ = tx.send(GuiCommand::PlayTts {
+                text: trimmed.to_string(),
+                accent,
+            });
+        }
+    }
+
+    pub fn update_hotkey(&mut self, new_hotkey: &str) {
+        let trimmed = new_hotkey.trim().to_lowercase();
+        self.settings_hotkey = trimmed.clone();
+        if let Some(ref tx) = self.tx_hotkey {
+            let _ = tx.send(trimmed);
+        }
+    }
+
     pub fn load_provider_settings(&mut self, config: &AppConfig, provider_name: &str) {
         self.settings_provider = provider_name.to_string();
         if let Some(cfg) = config.providers.get(provider_name) {
@@ -142,6 +173,7 @@ impl SharedPopupState {
             self.settings_base_url.clear();
             self.settings_model.clear();
         }
+        self.settings_hotkey = config.selection.hotkey.clone();
         self.test_feedback = None;
     }
 
