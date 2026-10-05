@@ -55,8 +55,8 @@ impl eframe::App for PopupApp {
                 #[cfg(target_os = "linux")]
                 if let Some(win) = lock.x11_window {
                     let (s_w, s_h) = lock.screen_size;
-                    let win_w = if s_w > 2000.0 { 840 } else { 420 };
-                    let win_h = if s_h > 1200.0 { 520 } else { 260 };
+                    let win_w = if s_w > 2000.0 { 880 } else { 440 };
+                    let win_h = if s_h > 1200.0 { 560 } else { 280 };
                     let (x, y) = lock.window_pos.unwrap_or((
                         ((s_w - win_w as f32) / 2.0).max(10.0),
                         ((s_h - win_h as f32) / 2.0).max(10.0),
@@ -75,7 +75,7 @@ impl eframe::App for PopupApp {
 
         // 首次显示时强制发送紧凑尺寸命令，彻底杜绝部分 X11 窗口管理器将窗口默认最大化拉伸
         if !self.initial_sized {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(420.0, 260.0)));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(440.0, 280.0)));
             self.initial_sized = true;
         }
 
@@ -86,21 +86,21 @@ impl eframe::App for PopupApp {
                 #[cfg(target_os = "linux")]
                 if let Some(win) = lock.x11_window {
                     let (s_w, s_h) = lock.screen_size;
-                    let win_w = if s_w > 2000.0 { 840 } else { 420 };
-                    let win_h = if s_h > 1200.0 { 520 } else { 260 };
+                    let win_w = if s_w > 2000.0 { 880 } else { 440 };
+                    let win_h = if s_h > 1200.0 { 560 } else { 280 };
                     crate::gui::move_resize_x11(win, pos.0 as i32, pos.1 as i32, win_w, win_h);
                 }
             }
             lock.should_update_pos = false;
         }
 
-        // 视口尺寸主动纠偏：如果窗口管理器 Muffin 强行铺满屏幕 (宽度 > 500pt)，立即发送 EWMH 指令恢复紧凑窗口
-        if ui.max_rect().width() > 500.0 {
+        // 视口尺寸主动纠偏：如果窗口管理器 Muffin 强行铺满屏幕 (宽度 > 520pt)，立即发送 EWMH 指令恢复紧凑窗口
+        if ui.max_rect().width() > 520.0 {
             #[cfg(target_os = "linux")]
             if let Some(win) = lock.x11_window {
                 let (s_w, s_h) = lock.screen_size;
-                let win_w = if s_w > 2000.0 { 840 } else { 420 };
-                let win_h = if s_h > 1200.0 { 520 } else { 260 };
+                let win_w = if s_w > 2000.0 { 880 } else { 440 };
+                let win_h = if s_h > 1200.0 { 560 } else { 280 };
                 let (x, y) = lock.window_pos.unwrap_or((
                     ((s_w - win_w as f32) / 2.0).max(10.0),
                     ((s_h - win_h as f32) / 2.0).max(10.0),
@@ -222,89 +222,95 @@ impl eframe::App for PopupApp {
                                     trigger_retranslate = true;
                                 }
                             }
-                            ui.separator();
-                            if ui.button("互换语种").clicked() {
-                                if source_lang == "auto" {
-                                    source_lang = target_lang.clone();
-                                    target_lang = "en".into();
-                                } else {
-                                    std::mem::swap(&mut source_lang, &mut target_lang);
-                                }
-                                trigger_retranslate = true;
-                            }
                         });
 
-                    // 弹性空白填充，将右侧控制按钮顶至右端
-                    // 弹性空白填充区：仅在该空白区按住拖拽时，才拖动窗口，杜绝与下拉框点击发生冲突
-                    let available_w = ui.available_width();
-                    let right_tools_w = 200.0;
-                    let spacer_w = (available_w - right_tools_w).max(8.0);
-                    let (_spacer_rect, spacer_resp) = ui.allocate_exact_size(egui::vec2(spacer_w, 24.0), egui::Sense::drag());
-                    if spacer_resp.dragged() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
-
-                    // 1.3 取词模式切换 (划选即翻译 / 伴随阅读 / 手动模式)
-                    let mode_badge = match selection_mode {
-                        SelectionMode::Automatic => "划选即翻译",
-                        SelectionMode::Companion => "伴随阅读",
-                        SelectionMode::Manual => "手动模式",
-                    };
-                    egui::ComboBox::from_id_salt("header_mode_select")
-                        .selected_text(egui::RichText::new(mode_badge).size(12.0).color(egui::Color32::from_rgb(36, 41, 47)))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut selection_mode, SelectionMode::Automatic, "划选即翻译 (任意划选自动弹窗)");
-                            ui.selectable_value(&mut selection_mode, SelectionMode::Companion, "伴随阅读 (推荐，关闭时静默)");
-                            ui.selectable_value(&mut selection_mode, SelectionMode::Manual, "手动模式 (仅按快捷键弹窗)");
-                        });
-
-                    // 1.4 📌 图钉固定按钮 (独立圆角卡扣式设计)
-                    let pin_bg = if is_pinned {
-                        egui::Color32::from_rgb(226, 232, 240)
-                    } else {
-                        egui::Color32::WHITE
-                    };
-                    let pin_stroke = if is_pinned {
-                        egui::Stroke::new(1.2, egui::Color32::from_rgb(239, 68, 68))
-                    } else {
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(208, 215, 222))
-                    };
-
-                    let pin_btn = egui::Button::new(egui::RichText::new("📌").size(12.5))
-                        .fill(pin_bg)
-                        .stroke(pin_stroke)
-                        .corner_radius(6.0);
-                    if ui.add(pin_btn).on_hover_text("固定悬浮窗位置 (防止失焦自动收起)").clicked() {
-                        lock.is_pinned = !is_pinned;
-                    }
-
-                    // 1.5 ⚙ 设置按钮
-                    let settings_color = if show_settings {
-                        egui::Color32::from_rgb(37, 99, 235)
-                    } else {
-                        egui::Color32::from_rgb(87, 96, 106)
-                    };
-                    if ui
-                        .button(egui::RichText::new("⚙").size(14.0).color(settings_color))
-                        .on_hover_text("管理服务商 API Key、自定义快捷键与参数设置")
-                        .clicked()
-                    {
-                        lock.show_settings = !lock.show_settings;
-                        if lock.show_settings {
-                            let active_p = lock.active_provider.clone();
-                            lock.load_provider_settings(&self.config, &active_p);
+                    // 1.2.1 外部独立语言互换小图标按钮 (小交换图标)
+                    let swap_resp = draw_exchange_icon(ui).on_hover_text("互换源语言与目标语言");
+                    if swap_resp.clicked() {
+                        if source_lang == "auto" {
+                            source_lang = target_lang.clone();
+                            target_lang = "en".into();
+                        } else {
+                            std::mem::swap(&mut source_lang, &mut target_lang);
                         }
+                        trigger_retranslate = true;
                     }
 
-                    // 1.6 × 关闭收起按钮
-                    if ui
-                        .button(egui::RichText::new("×").size(15.0).color(egui::Color32::from_rgb(87, 96, 106)))
-                        .on_hover_text("收起浮窗 (后台常驻，按 Alt+Q 随时呼出)")
-                        .clicked()
-                    {
-                        lock.is_visible = false;
-                        lock.show_settings = false;
-                    }
+                    // 右侧控制区域 (从右向左紧贴右边缘布局，永不溢出)
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+
+                        // 1.6 × 关闭收起按钮
+                        if ui
+                            .button(egui::RichText::new("×").size(15.0).color(egui::Color32::from_rgb(87, 96, 106)))
+                            .on_hover_text("收起浮窗 (后台常驻，按 Alt+Q 随时呼出)")
+                            .clicked()
+                        {
+                            lock.is_visible = false;
+                            lock.show_settings = false;
+                        }
+
+                        // 1.5 ⚙ 设置按钮
+                        let settings_color = if show_settings {
+                            egui::Color32::from_rgb(37, 99, 235)
+                        } else {
+                            egui::Color32::from_rgb(87, 96, 106)
+                        };
+                        if ui
+                            .button(egui::RichText::new("⚙").size(14.0).color(settings_color))
+                            .on_hover_text("管理服务商 API Key、自定义快捷键与参数设置")
+                            .clicked()
+                        {
+                            lock.show_settings = !lock.show_settings;
+                            if lock.show_settings {
+                                let active_p = lock.active_provider.clone();
+                                lock.load_provider_settings(&self.config, &active_p);
+                            }
+                        }
+
+                        // 1.4 📌 图钉固定按钮 (独立圆角卡扣式设计)
+                        let pin_bg = if is_pinned {
+                            egui::Color32::from_rgb(226, 232, 240)
+                        } else {
+                            egui::Color32::WHITE
+                        };
+                        let pin_stroke = if is_pinned {
+                            egui::Stroke::new(1.2, egui::Color32::from_rgb(239, 68, 68))
+                        } else {
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(208, 215, 222))
+                        };
+
+                        let pin_btn = egui::Button::new(egui::RichText::new("📌").size(12.5))
+                            .fill(pin_bg)
+                            .stroke(pin_stroke)
+                            .corner_radius(6.0);
+                        if ui.add(pin_btn).on_hover_text("固定悬浮窗位置 (防止失焦自动收起)").clicked() {
+                            lock.is_pinned = !is_pinned;
+                        }
+
+                        // 1.3 取词模式切换 (划选即翻译 / 伴随阅读 / 手动模式)
+                        let mode_badge = match selection_mode {
+                            SelectionMode::Automatic => "划选即翻译",
+                            SelectionMode::Companion => "伴随阅读",
+                            SelectionMode::Manual => "手动模式",
+                        };
+                        egui::ComboBox::from_id_salt("header_mode_select")
+                            .selected_text(egui::RichText::new(mode_badge).size(12.0).color(egui::Color32::from_rgb(36, 41, 47)))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut selection_mode, SelectionMode::Automatic, "划选即翻译 (任意划选自动弹窗)");
+                                ui.selectable_value(&mut selection_mode, SelectionMode::Companion, "伴随阅读 (推荐，关闭时静默)");
+                                ui.selectable_value(&mut selection_mode, SelectionMode::Manual, "手动模式 (仅按快捷键弹窗)");
+                            });
+
+                        // 弹性空白拖拽区 (仅在此拖拽，杜绝与下拉框点击冲突)
+                        let drag_w = ui.available_width().max(0.0);
+                        if drag_w > 2.0 {
+                            let (_spacer_rect, drag_resp) = ui.allocate_exact_size(egui::vec2(drag_w, 22.0), egui::Sense::drag());
+                            if drag_resp.dragged() {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                            }
+                        }
+                    });
                 });
 
                 ui.add_space(4.0);
@@ -482,13 +488,13 @@ impl eframe::App for PopupApp {
                 }
 
                 // ==================== 3. 主内容区域 (上下两张卡片 + 中间 Splitter) ====================
-                let total_avail_h = ui.available_height().max(140.0);
+                let total_avail_h = ui.available_height().max(120.0);
                 let splitter_h = 6.0;
-                let cards_avail_h = (total_avail_h - splitter_h).max(120.0);
+                let spacing_y = ui.spacing().item_spacing.y;
+                let cards_avail_h = (total_avail_h - splitter_h - 2.0 * spacing_y).max(80.0);
 
                 let ratio = lock.splitter_ratio.clamp(0.25, 0.75);
-                let card1_target_h = cards_avail_h * ratio;
-                let card2_target_h = cards_avail_h * (1.0 - ratio);
+                let card1_target_h = (cards_avail_h * ratio).max(48.0);
 
                 // 3.1 原文交互卡片 (Top Card - 白底圆角)
                 egui::Frame::new()
@@ -497,17 +503,18 @@ impl eframe::App for PopupApp {
                     .corner_radius(8.0)
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
-                        ui.set_height(card1_target_h.max(50.0));
+                        ui.set_height(card1_target_h);
 
-                        // 多行文本编辑框
-                        let text_edit_response = ui.add(
+                        // 文本输入区高度 = 当前卡片可用高度 - 底栏预留高度
+                        let edit_h = (ui.available_height() - 24.0).max(20.0);
+                        let text_edit_response = ui.add_sized(
+                            [ui.available_width(), edit_h],
                             egui::TextEdit::multiline(&mut lock.edit_text)
                                 .hint_text("输入或划选文本，按回车立即翻译...")
                                 .desired_rows(2)
                                 .font(egui::TextStyle::Body)
                                 .text_color(egui::Color32::from_rgb(31, 41, 55))
-                                .frame(egui::Frame::NONE)
-                                .desired_width(f32::INFINITY),
+                                .frame(egui::Frame::NONE),
                         );
 
                         if text_edit_response.has_focus()
@@ -517,69 +524,67 @@ impl eframe::App for PopupApp {
                         }
 
                         // 原文卡片底栏：左侧字符数，右侧发音/清空/翻译/复制
-                        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                            ui.horizontal(|ui| {
-                                let char_count = lock.edit_text.chars().count();
-                                ui.label(
-                                    egui::RichText::new(format!("{char_count} 字符"))
-                                        .size(11.5)
-                                        .color(egui::Color32::from_rgb(107, 114, 128)),
-                                );
+                        ui.horizontal(|ui| {
+                            let char_count = lock.edit_text.chars().count();
+                            ui.label(
+                                egui::RichText::new(format!("{char_count} 字符"))
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(107, 114, 128)),
+                            );
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
 
-                                    // 复制原文
+                                // 复制原文
+                                if ui
+                                    .button(egui::RichText::new("复制").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
+                                    .on_hover_text("复制原文到剪贴板")
+                                    .clicked()
+                                {
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(&lock.edit_text);
+                                    }
+                                }
+
+                                // 翻译按钮
+                                if ui
+                                    .button(egui::RichText::new("翻译").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
+                                    .on_hover_text("立即发起翻译 (Enter)")
+                                    .clicked()
+                                {
+                                    trigger_retranslate = true;
+                                }
+
+                                // 清空按钮
+                                if !lock.edit_text.is_empty() {
                                     if ui
-                                        .button(egui::RichText::new("复制").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
-                                        .on_hover_text("复制原文到剪贴板")
+                                        .button(egui::RichText::new("清空").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
+                                        .on_hover_text("清空输入内容")
                                         .clicked()
                                     {
-                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                            let _ = clipboard.set_text(&lock.edit_text);
-                                        }
+                                        lock.edit_text.clear();
+                                        lock.status = TranslationStatus::Idle;
                                     }
+                                }
 
-                                    // 翻译按钮
+                                // 英美发音按钮 (含英文字符才显示，免缓存流式秒播)
+                                if has_english_text(&lock.edit_text) {
                                     if ui
-                                        .button(egui::RichText::new("翻译").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
-                                        .on_hover_text("立即发起翻译 (Enter)")
+                                        .button(egui::RichText::new("美 🔊").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
+                                        .on_hover_text("美音发音 (免缓存流式播放)")
                                         .clicked()
                                     {
-                                        trigger_retranslate = true;
+                                        lock.play_tts(&lock.edit_text, Accent::Us);
                                     }
 
-                                    // 清空按钮
-                                    if !lock.edit_text.is_empty() {
-                                        if ui
-                                            .button(egui::RichText::new("清空").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
-                                            .on_hover_text("清空输入内容")
-                                            .clicked()
-                                        {
-                                            lock.edit_text.clear();
-                                            lock.status = TranslationStatus::Idle;
-                                        }
+                                    if ui
+                                        .button(egui::RichText::new("英 🔊").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
+                                        .on_hover_text("英音发音 (免缓存流式播放)")
+                                        .clicked()
+                                    {
+                                        lock.play_tts(&lock.edit_text, Accent::Uk);
                                     }
-
-                                    // 英美发音按钮 (含英文字符才显示，免缓存流式秒播)
-                                    if has_english_text(&lock.edit_text) {
-                                        if ui
-                                            .button(egui::RichText::new("美 🔊").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
-                                            .on_hover_text("美音发音 (免缓存流式播放)")
-                                            .clicked()
-                                        {
-                                            lock.play_tts(&lock.edit_text, Accent::Us);
-                                        }
-
-                                        if ui
-                                            .button(egui::RichText::new("英 🔊").size(12.0).color(egui::Color32::from_rgb(75, 85, 99)))
-                                            .on_hover_text("英音发音 (免缓存流式播放)")
-                                            .clicked()
-                                        {
-                                            lock.play_tts(&lock.edit_text, Accent::Uk);
-                                        }
-                                    }
-                                });
+                                }
                             });
                         });
                     });
@@ -633,13 +638,16 @@ impl eframe::App for PopupApp {
                     .corner_radius(8.0)
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
-                        ui.set_height(card2_target_h.max(55.0));
+                        // 占满剩余所有可用高度，绝对不溢出，四角完整显露！
+                        let card2_inner_h = ui.available_height();
+                        ui.set_height(card2_inner_h);
 
-                        // 内容展示区
+                        // 译文内容展示区，留出底部 26px 给常驻底栏
+                        let scroll_h = (card2_inner_h - 26.0).max(20.0);
                         egui::ScrollArea::vertical()
                             .id_salt("translation_content_scroll")
                             .auto_shrink([false, false])
-                            .max_height(card2_target_h - 26.0)
+                            .max_height(scroll_h)
                             .show(ui, |ui| {
                                 match &status {
                                     TranslationStatus::Idle => {
@@ -659,7 +667,7 @@ impl eframe::App for PopupApp {
                                     TranslationStatus::Success(res) => {
                                         ui.label(
                                             egui::RichText::new(&res.translated_text)
-                                                .size(16.0)
+                                                .size(15.5)
                                                 .strong()
                                                 .color(egui::Color32::from_rgb(17, 24, 39)),
                                         );
@@ -686,38 +694,71 @@ impl eframe::App for PopupApp {
                                 }
                             });
 
-                        // 译文底栏：左侧本地缓存状态 / 耗时；右侧圆角复制按钮
-                        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                            ui.horizontal(|ui| {
-                                if let TranslationStatus::Success(ref res) = status {
+                        // 译文底栏：固定常驻！左侧常驻本地缓存/耗时/状态提示，右侧常驻圆角复制按钮
+                        ui.horizontal(|ui| {
+                            // 状态与耗时指示器
+                            match &status {
+                                TranslationStatus::Success(res) => {
                                     if res.from_cache {
                                         ui.label(
-                                            egui::RichText::new("本地缓存")
+                                            egui::RichText::new("⚡ 本地缓存")
                                                 .size(11.5)
-                                                .color(egui::Color32::from_rgb(75, 85, 99)),
+                                                .color(egui::Color32::from_rgb(16, 185, 129)),
                                         );
                                     } else {
                                         ui.label(
-                                            egui::RichText::new(format!("耗时: {:.0}ms", res.latency_ms))
+                                            egui::RichText::new(format!("⏱ 耗时: {:.0}ms", res.latency_ms))
                                                 .size(11.5)
                                                 .color(egui::Color32::from_rgb(107, 114, 128)),
                                         );
                                     }
+                                }
+                                TranslationStatus::Loading { .. } => {
+                                    ui.label(
+                                        egui::RichText::new("⏳ 翻译中...")
+                                            .size(11.5)
+                                            .color(egui::Color32::from_rgb(37, 99, 235)),
+                                    );
+                                }
+                                TranslationStatus::Error { .. } => {
+                                    ui.label(
+                                        egui::RichText::new("❌ 失败")
+                                            .size(11.5)
+                                            .color(egui::Color32::from_rgb(220, 38, 38)),
+                                    );
+                                }
+                                TranslationStatus::Idle => {
+                                    ui.label(
+                                        egui::RichText::new("就绪")
+                                            .size(11.5)
+                                            .color(egui::Color32::from_rgb(156, 163, 175)),
+                                    );
+                                }
+                            }
 
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        let btn_label = if is_copied { "✅ 已复制" } else { "复制" };
-                                        let copy_btn = egui::Button::new(egui::RichText::new(btn_label).size(12.0).color(egui::Color32::from_rgb(31, 41, 55)))
-                                            .fill(egui::Color32::WHITE)
-                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(208, 215, 222)))
-                                            .corner_radius(6.0);
+                            // 复制按钮常驻右侧
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let btn_label = if is_copied { "✅ 已复制" } else { "复制" };
+                                let copy_btn = egui::Button::new(
+                                    egui::RichText::new(btn_label)
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(31, 41, 55)),
+                                )
+                                .fill(egui::Color32::WHITE)
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(208, 215, 222)))
+                                .corner_radius(6.0);
 
-                                        if ui.add(copy_btn).clicked() {
-                                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                                let _ = clipboard.set_text(&res.translated_text);
-                                                lock.copy_feedback_time = Some(std::time::Instant::now());
-                                            }
+                                if ui.add(copy_btn).on_hover_text("复制译文到剪贴板").clicked() {
+                                    let text_to_copy = match &status {
+                                        TranslationStatus::Success(res) => res.translated_text.clone(),
+                                        _ => lock.edit_text.clone(),
+                                    };
+                                    if !text_to_copy.is_empty() {
+                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                            let _ = clipboard.set_text(&text_to_copy);
+                                            lock.copy_feedback_time = Some(std::time::Instant::now());
                                         }
-                                    });
+                                    }
                                 }
                             });
                         });
@@ -756,4 +797,48 @@ fn lang_display_short(lang: &str) -> &'static str {
         "ru" => "俄",
         _ => "语",
     }
+}
+
+fn draw_exchange_icon(ui: &mut egui::Ui) -> egui::Response {
+    let desired_size = egui::vec2(22.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let is_hovered = response.hovered();
+        let bg_color = if is_hovered {
+            egui::Color32::from_rgb(226, 232, 240)
+        } else {
+            egui::Color32::WHITE
+        };
+        let border_color = if is_hovered {
+            egui::Color32::from_rgb(59, 130, 246)
+        } else {
+            egui::Color32::from_rgb(208, 215, 222)
+        };
+        let arrow_color = if is_hovered {
+            egui::Color32::from_rgb(37, 99, 235)
+        } else {
+            egui::Color32::from_rgb(75, 85, 99)
+        };
+
+        ui.painter().rect_filled(rect, 6.0, bg_color);
+        ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(1.0, border_color), egui::StrokeKind::Inside);
+
+        let stroke = egui::Stroke::new(1.3, arrow_color);
+        let pad_x = 4.0;
+        let y_top = rect.center().y - 3.0;
+        let y_bot = rect.center().y + 3.0;
+        let x_left = rect.min.x + pad_x;
+        let x_right = rect.max.x - pad_x;
+
+        // 上箭头: 右行 ->
+        ui.painter().line_segment([egui::pos2(x_left, y_top), egui::pos2(x_right, y_top)], stroke);
+        ui.painter().line_segment([egui::pos2(x_right - 3.0, y_top - 2.5), egui::pos2(x_right, y_top)], stroke);
+        ui.painter().line_segment([egui::pos2(x_right - 3.0, y_top + 2.5), egui::pos2(x_right, y_top)], stroke);
+
+        // 下箭头: 左行 <-
+        ui.painter().line_segment([egui::pos2(x_right, y_bot), egui::pos2(x_left, y_bot)], stroke);
+        ui.painter().line_segment([egui::pos2(x_left + 3.0, y_bot - 2.5), egui::pos2(x_left, y_bot)], stroke);
+        ui.painter().line_segment([egui::pos2(x_left + 3.0, y_bot + 2.5), egui::pos2(x_left, y_bot)], stroke);
+    }
+    response
 }

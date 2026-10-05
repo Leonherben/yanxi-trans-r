@@ -117,8 +117,8 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             if let Ok(reply) = cookie.reply() {
                                 let (px, py) = (reply.root_x as i32, reply.root_y as i32);
                                 lock.cursor_pos = (px, py);
-                                let win_w = if s_w > 2000.0 { 840.0 } else { 420.0 };
-                                let win_h = if s_h > 1200.0 { 520.0 } else { 260.0 };
+                                let win_w = if s_w > 2000.0 { 880.0 } else { 440.0 };
+                                let win_h = if s_h > 1200.0 { 560.0 } else { 280.0 };
                                 let target_pos = SharedPopupState::compute_target_pos(px, py, win_w, win_h, s_w, s_h);
                                 lock.window_pos = Some(target_pos);
                                 if let Some(win) = lock.x11_window {
@@ -162,8 +162,8 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([420.0, 260.0])
-            .with_min_inner_size([320.0, 180.0])
+            .with_inner_size([440.0, 280.0])
+            .with_min_inner_size([320.0, 200.0])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
@@ -218,8 +218,8 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     lock.screen_size = (screen_w, screen_h);
                                 }
 
-                                let init_w = if screen_w > 2000.0 { 840 } else { 420 };
-                                let init_h = if screen_h > 1200.0 { 520 } else { 260 };
+                                let init_w = if screen_w > 2000.0 { 880 } else { 440 };
+                                let init_h = if screen_h > 1200.0 { 560 } else { 280 };
                                 let init_x = ((screen_w - init_w as f32) / 2.0).max(10.0) as i32;
                                 let init_y = ((screen_h - init_h as f32) / 2.0).max(10.0) as i32;
                                 move_resize_x11(win, init_x, init_y, init_w, init_h);
@@ -291,8 +291,8 @@ async fn handle_worker_events(
                             continue;
                         }
 
-                        let win_w = if s_w > 2000.0 { 840.0 } else { 420.0 };
-                        let win_h = if s_h > 1200.0 { 520.0 } else { 260.0 };
+                        let win_w = if s_w > 2000.0 { 880.0 } else { 440.0 };
+                        let win_h = if s_h > 1200.0 { 560.0 } else { 280.0 };
                         let target_pos = SharedPopupState::compute_target_pos(pos.0, pos.1, win_w, win_h, s_w, s_h);
                         println!("[Yanxi GUI] 划词事件触发 @ ({}, {}): \"{}\"", pos.0, pos.1, text);
 
