@@ -1,6 +1,6 @@
 [package]
 name = "yanxi-trans-r"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["LeonHerben <herberten16@gmail.com>"]
 description = "High-performance, ultra-lightweight selection translation tool in Rust"
