@@ -9,6 +9,7 @@ pub struct PopupApp {
     state: Arc<Mutex<SharedPopupState>>,
     config: AppConfig,
     show_key_plain: bool,
+    last_visible: Option<bool>,
 }
 
 impl PopupApp {
@@ -17,6 +18,7 @@ impl PopupApp {
             state,
             config,
             show_key_plain: false,
+            last_visible: None,
         }
     }
 }
@@ -27,8 +29,6 @@ impl eframe::App for PopupApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.ctx().set_visuals(egui::Visuals::dark());
-
         // 全局 Esc 快捷键：随时收起浮窗
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             if let Ok(mut lock) = self.state.lock() {
@@ -42,19 +42,22 @@ impl eframe::App for PopupApp {
             Err(_) => return,
         };
 
+        // 仅在显隐状态发生变化时才发送 Visible 命令，杜绝 X11 每帧重绘与暴风式闪烁卡顿！
+        if self.last_visible != Some(lock.is_visible) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(lock.is_visible));
+            self.last_visible = Some(lock.is_visible);
+        }
+
+        if !lock.is_visible {
+            return;
+        }
+
         // 处理位置更新与显隐控制
         if lock.should_update_pos {
             if let Some(pos) = lock.window_pos {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(pos.0, pos.1)));
             }
             lock.should_update_pos = false;
-        }
-
-        if !lock.is_visible {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            return;
-        } else {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
 
         let is_pinned = lock.is_pinned;

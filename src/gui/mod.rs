@@ -97,13 +97,15 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             });
         })?;
 
-    // 7. 在主线程启动 eframe 原生无边框透明视口
+    // 7. 在主线程启动 eframe 原生无边框透明视口 (使用 OpenGL Glow 后端，杜绝 Vulkan swapchain 闪烁与掉帧)
     let native_options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Glow,
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([440.0, 260.0])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
+            .with_active(false)
             .with_resizable(true),
         ..Default::default()
     };
@@ -113,13 +115,15 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "yanxi-popup",
         native_options,
         Box::new(move |cc| {
+            cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
             fonts::configure_cjk_fonts(&cc.egui_ctx);
             if let Ok(mut lock) = state_app.lock() {
                 lock.ctx = Some(cc.egui_ctx.clone());
             }
             Ok(Box::new(PopupApp::new(state_app, config)))
         }),
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }

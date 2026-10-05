@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
 use x11rb::protocol::xfixes;
@@ -135,7 +135,6 @@ impl SelectionListener for LinuxX11SelectionListener {
 
                 let mut pending_pos: Option<(i32, i32)> = None;
                 let mut last_text = String::new();
-                let mut last_trigger = Instant::now() - Duration::from_secs(10);
 
                 while is_running.load(Ordering::SeqCst) {
                     let event = match conn.wait_for_event() {
@@ -156,6 +155,7 @@ impl SelectionListener for LinuxX11SelectionListener {
                                         .and_then(|c| c.reply().ok())
                                         .map(|p| (p.root_x as i32, p.root_y as i32))
                                         .unwrap_or((0, 0));
+                                    last_text.clear();
                                     let _ = tx.send(SelectionEvent::Cleared { pos });
                                 } else {
                                     // 用户划词产生了新的选区
@@ -235,14 +235,8 @@ impl SelectionListener for LinuxX11SelectionListener {
                                 if let Some(clean) =
                                     sanitize_selection_text(&text, min_length, max_length)
                                 {
-                                    let now = Instant::now();
-                                    // 过滤重复相同内容与过频请求
-                                    if clean != last_text
-                                        || now.duration_since(last_trigger)
-                                            >= Duration::from_millis(1500)
-                                    {
+                                    if clean != last_text {
                                         last_text = clean.clone();
-                                        last_trigger = now;
                                         let _ = tx.send(SelectionEvent::Selected {
                                             text: clean,
                                             pos,
