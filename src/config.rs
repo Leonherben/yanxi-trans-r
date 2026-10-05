@@ -32,8 +32,8 @@ impl Default for ProviderConfig {
 #[serde(rename_all = "lowercase")]
 pub enum SelectionMode {
     #[default]
-    Companion,  // 伴随阅读 (默认)：仅浮窗可见/固定时划词才自动刷新；关闭时静默
-    Automatic,  // 划选即弹窗：任意划选均自动弹窗
+    Automatic,  // 划选即翻译 (默认)：任意划选自动弹窗显示在词下方
+    Companion,  // 伴随阅读：仅浮窗可见/固定时划词才自动刷新；关闭时静默
     Manual,     // 手动模式：划选不弹窗
 }
 
@@ -59,8 +59,8 @@ impl Default for SelectionConfig {
         Self {
             enable_x11_primary: true,
             auto_popup_on_selection: true,
-            auto_popup_only_when_visible: true,
-            mode: SelectionMode::Companion,
+            auto_popup_only_when_visible: false,
+            mode: SelectionMode::Automatic,
             hotkey: default_hotkey(),
             debounce_ms: 150,
         }
@@ -69,13 +69,7 @@ impl Default for SelectionConfig {
 
 impl SelectionConfig {
     pub fn get_mode(&self) -> SelectionMode {
-        if !self.auto_popup_on_selection {
-            SelectionMode::Manual
-        } else if self.auto_popup_only_when_visible || self.mode == SelectionMode::Companion {
-            SelectionMode::Companion
-        } else {
-            self.mode
-        }
+        self.mode
     }
 
     pub fn set_mode(&mut self, mode: SelectionMode) {

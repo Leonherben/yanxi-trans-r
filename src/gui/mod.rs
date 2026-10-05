@@ -39,11 +39,24 @@ pub fn move_resize_x11(win: u32, x: i32, y: i32, w: u32, h: u32) {
                 if let Ok(cookie) = conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, event) {
                     let _ = cookie.check();
                     let _ = conn.flush();
-                    println!("[Yanxi X11] 📏 move_resize_x11 发送成功 0x{:08x}: pos=({}, {}), size={}x{}", win, x, y, w, h);
                 }
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+pub fn get_window_position_x11(win: u32) -> Option<(i32, i32)> {
+    if let Ok((conn, screen_num)) = x11rb::connect(None) {
+        use x11rb::protocol::xproto::ConnectionExt;
+        let root = conn.setup().roots[screen_num].root;
+        if let Ok(cookie) = conn.translate_coordinates(win, root, 0, 0) {
+            if let Ok(reply) = cookie.reply() {
+                return Some((reply.dst_x as i32, reply.dst_y as i32));
+            }
+        }
+    }
+    None
 }
 
 pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -104,7 +117,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     start_global_hotkey_listener(initial_hotkey, rx_hotkey, move || {
         if let Ok(mut lock) = state_hotkey.lock() {
             lock.is_visible = !lock.is_visible;
-            if lock.is_visible {
+            if lock.is_visible && !lock.is_pinned {
                 #[cfg(target_os = "linux")]
                 {
                     if let Ok((conn, screen_num)) = x11rb::connect(None) {
@@ -326,13 +339,8 @@ async fn handle_worker_events(
                         perform_translation(&text, &source_lang, &target_lang, &provider_name, &config, &cache, &state).await;
                     }
                     SelectionEvent::Cleared { .. } => {
-                        if let Ok(mut lock) = state.lock() {
-                            // 仅在完全自动划选模式下，取消选区时自动收起
-                            if lock.selection_mode == SelectionMode::Automatic && !lock.is_pinned && lock.is_visible {
-                                lock.is_visible = false;
-                                lock.request_repaint();
-                            }
-                        }
+                        // 选区取消时不粗暴关闭悬浮窗，保留窗口供用户查阅译文、发音及复制。
+                        // 用户可通过快捷键 (默认 Alt+Q) 或右上角 "×" 轻松收起。
                     }
                 }
             }
@@ -391,7 +399,15 @@ async fn perform_translation(
     cache: &SQLiteCache,
     state: &Arc<Mutex<SharedPopupState>>,
 ) {
-    let req = TranslationRequest::with_langs(text, source_lang, target_lang);
+    let effective_target = if (source_lang == "auto" || source_lang == "zh-CN")
+        && target_lang == "zh-CN"
+        && text.chars().any(|c| ('\u{4e00}'..='\u{9fa5}').contains(&c))
+    {
+        "en"
+    } else {
+        target_lang
+    };
+    let req = TranslationRequest::with_langs(text, source_lang, effective_target);
 
     // 1. 本地缓存秒开
     if let Some(cached) = cache.get(&req, provider_name) {

@@ -124,7 +124,7 @@ impl SelectionListener for LinuxX11SelectionListener {
                     | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE;
 
                 if let Err(e) =
-                    xfixes::select_selection_input(&conn, root, primary_atom, selection_mask)
+                    xfixes::select_selection_input(&conn, dummy_window, primary_atom, selection_mask)
                 {
                     eprintln!("[Yanxi X11] 注册 XFixes 选区监听失败: {e}");
                     is_running.store(false, Ordering::SeqCst);
@@ -132,6 +132,7 @@ impl SelectionListener for LinuxX11SelectionListener {
                 }
 
                 let _ = conn.flush();
+                println!("[Yanxi X11] 🎯 X11 选区监听线程启动完成");
 
                 let mut pending_pos: Option<(i32, i32)> = None;
                 let mut last_text = String::new();
