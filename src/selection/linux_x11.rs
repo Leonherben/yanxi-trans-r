@@ -1,6 +1,6 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
 use x11rb::protocol::xfixes;
@@ -8,8 +8,254 @@ use x11rb::protocol::xproto::{
     self, AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, KeyButMask, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
+use x11rb::rust_connection::{DefaultStream, PollMode, Stream};
+use x11rb::utils::RawFdContainer;
 
-use super::{sanitize_selection_text, SelectionEvent, SelectionListener};
+use super::{SelectionEvent, SelectionListener, sanitize_selection_text};
+
+const REPEAT_WINDOW: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct SelectionDedup {
+    last: Option<(String, Instant)>,
+}
+
+impl SelectionDedup {
+    fn accept(&mut self, text: &str, now: Instant) -> bool {
+        if self.last.as_ref().is_some_and(|(last, at)| {
+            last == text && now.saturating_duration_since(*at) < REPEAT_WINDOW
+        }) {
+            return false;
+        }
+        self.last = Some((text.to_owned(), now));
+        true
+    }
+
+    fn clear(&mut self) {
+        self.last = None;
+    }
+}
+
+/// x11rb's default poll can wait indefinitely. This stream bounds handshake,
+/// property replies, and flushing as well as the selection notification itself.
+struct DeadlineStream {
+    inner: DefaultStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn check_deadline(&self) -> std::io::Result<()> {
+        if Instant::now() >= self.deadline {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "X11 selection deadline",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Stream for DeadlineStream {
+    fn poll(&self, _mode: PollMode) -> std::io::Result<()> {
+        self.check_deadline()?;
+        // Stream::poll explicitly permits spurious readiness. The read/write
+        // calls remain nonblocking, so sleeping briefly avoids a busy loop.
+        std::thread::sleep(Duration::from_millis(2));
+        self.check_deadline()
+    }
+
+    fn read(&self, buf: &mut [u8], fds: &mut Vec<RawFdContainer>) -> std::io::Result<usize> {
+        self.check_deadline()?;
+        self.inner.read(buf, fds)
+    }
+
+    fn write(&self, buf: &[u8], fds: &mut Vec<RawFdContainer>) -> std::io::Result<usize> {
+        self.check_deadline()?;
+        self.inner.write(buf, fds)
+    }
+}
+
+/// Linux's std UnixStream::connect has no timeout. Create a nonblocking socket
+/// so even a full X server listen backlog cannot stall the hotkey thread.
+fn connect_local_deadline(path: &str, deadline: Instant) -> Option<std::os::unix::net::UnixStream> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    #[repr(C)]
+    struct UnixAddress {
+        family: u16,
+        path: [u8; 108],
+    }
+    unsafe extern "C" {
+        #[link_name = "socket"]
+        fn socket_raw(domain: i32, kind: i32, protocol: i32) -> i32;
+        #[link_name = "connect"]
+        fn connect_raw(fd: i32, address: *const UnixAddress, len: u32) -> i32;
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() >= 108 || bytes.contains(&0) {
+        return None;
+    }
+    let mut address = UnixAddress {
+        family: 1,
+        path: [0; 108],
+    }; // AF_UNIX
+    address.path[..bytes.len()].copy_from_slice(bytes);
+    // Linux SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC; no shared fd ownership.
+    let fd = unsafe { socket_raw(1, 1 | 0x800 | 0x80000, 0) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: socket returned a newly owned valid fd, transferred exactly once.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    while Instant::now() < deadline {
+        // SAFETY: address has Linux sockaddr_un layout and its length includes
+        // the initialized, NUL-terminated path; fd stays alive through the call.
+        let result =
+            unsafe { connect_raw(owned.as_raw_fd(), &address, (2 + bytes.len() + 1) as u32) };
+        if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(106) {
+            return Some(std::os::unix::net::UnixStream::from(owned)); // EISCONN
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(4 | 11 | 114 | 115) => std::thread::sleep(Duration::from_millis(2)),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Direct PRIMARY conversion avoids arboard's unspecified blocking timeout.
+/// No helper threads, processes, or CLIPBOARD requests are created.
+pub fn get_current_selection() -> Option<String> {
+    use x11rb::reexports::x11rb_protocol::{parse_display, xauth};
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let display = parse_display::parse_display(None).ok()?;
+    let screen_num = usize::from(display.screen);
+    // Only Unix sockets and numeric TCP addresses: avoid unbounded DNS/connect.
+    let mut connected = None;
+    for addr in display.connect_instruction() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let candidate = match addr {
+            parse_display::ConnectAddress::Socket(path) => connect_local_deadline(&path, deadline)
+                .and_then(|stream| DefaultStream::from_unix_stream(stream).ok()),
+            parse_display::ConnectAddress::Hostname(host, port) => {
+                let ip = if host == "localhost" {
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                } else {
+                    host.parse::<std::net::IpAddr>().ok()?
+                };
+                let socket = std::net::SocketAddr::new(ip, port);
+                let timeout = deadline.saturating_duration_since(Instant::now());
+                std::net::TcpStream::connect_timeout(&socket, timeout)
+                    .ok()
+                    .and_then(|stream| DefaultStream::from_tcp_stream(stream).ok())
+            }
+            _ => None,
+        };
+        if let Some(value) = candidate {
+            connected = Some(value);
+            break;
+        }
+    }
+    let (inner, (family, address)) = connected?;
+    let (auth_name, auth_data) = xauth::get_auth(family, &address, display.display)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let conn = RustConnection::connect_to_stream_with_auth_info(
+        DeadlineStream { inner, deadline },
+        screen_num,
+        auth_name,
+        auth_data,
+    )
+    .ok()?;
+    let root = conn.setup().roots[screen_num].root;
+    let window = conn.generate_id().ok()?;
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT,
+        window,
+        root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &CreateWindowAux::new(),
+    )
+    .ok()?
+    .check()
+    .ok()?;
+    // Dropping this private connection destroys its auxiliary window even on timeout.
+    let primary = u32::from(AtomEnum::PRIMARY);
+    if conn.get_selection_owner(primary).ok()?.reply().ok()?.owner == 0 {
+        return None;
+    }
+    let utf8 = conn
+        .intern_atom(false, b"UTF8_STRING")
+        .ok()?
+        .reply()
+        .ok()?
+        .atom;
+    let property = conn
+        .intern_atom(false, b"YANXI_CURRENT_SELECTION")
+        .ok()?
+        .reply()
+        .ok()?
+        .atom;
+    for target in [utf8, u32::from(AtomEnum::STRING)] {
+        conn.convert_selection(window, primary, target, property, x11rb::CURRENT_TIME)
+            .ok()?;
+        conn.flush().ok()?;
+        while Instant::now() < deadline {
+            match conn.poll_for_event().ok()? {
+                Some(x11rb::protocol::Event::SelectionNotify(event))
+                    if event.requestor == window
+                        && event.selection == primary
+                        && event.target == target =>
+                {
+                    if event.property == 0 {
+                        break;
+                    }
+                    // Read enough to let the validator report >3000 characters, never truncate
+                    // an oversized property into apparently valid input. INCR is unsupported.
+                    let limit = (super::MAX_SELECTION_CHARS + 1) * 4;
+                    let reply = conn
+                        .get_property(
+                            true,
+                            window,
+                            property,
+                            AtomEnum::ANY,
+                            0,
+                            limit.div_ceil(4) as u32,
+                        )
+                        .ok()?
+                        .reply()
+                        .ok()?;
+                    if reply.format != 8 || reply.type_ != target {
+                        return None;
+                    }
+                    if reply.bytes_after > 0 {
+                        // At least 12004 bytes => at least 3001 Unicode characters.
+                        // Return the actual prefix, which validation will reject as too long.
+                        return Some(String::from_utf8_lossy(&reply.value).into_owned());
+                    }
+                    let text = if target == utf8 {
+                        String::from_utf8(reply.value).ok()?
+                    } else {
+                        reply.value.into_iter().map(char::from).collect()
+                    };
+                    return (!text.trim().is_empty()).then_some(text);
+                }
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    }
+    None
+}
 
 pub struct LinuxX11SelectionListener {
     debounce_ms: u64,
@@ -123,9 +369,12 @@ impl SelectionListener for LinuxX11SelectionListener {
                     | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
                     | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE;
 
-                if let Err(e) =
-                    xfixes::select_selection_input(&conn, dummy_window, primary_atom, selection_mask)
-                {
+                if let Err(e) = xfixes::select_selection_input(
+                    &conn,
+                    dummy_window,
+                    primary_atom,
+                    selection_mask,
+                ) {
                     eprintln!("[Yanxi X11] 注册 XFixes 选区监听失败: {e}");
                     is_running.store(false, Ordering::SeqCst);
                     return;
@@ -135,11 +384,15 @@ impl SelectionListener for LinuxX11SelectionListener {
                 println!("[Yanxi X11] 🎯 X11 选区监听线程启动完成");
 
                 let mut pending_pos: Option<(i32, i32)> = None;
-                let mut last_text = String::new();
+                let mut dedup = SelectionDedup::default();
 
                 while is_running.load(Ordering::SeqCst) {
-                    let event = match conn.wait_for_event() {
-                        Ok(ev) => ev,
+                    let event = match conn.poll_for_event() {
+                        Ok(Some(ev)) => ev,
+                        Ok(None) => {
+                            std::thread::sleep(Duration::from_millis(20));
+                            continue;
+                        }
                         Err(e) => {
                             eprintln!("[Yanxi X11] X11 事件循环异常中断: {e}");
                             break;
@@ -156,16 +409,26 @@ impl SelectionListener for LinuxX11SelectionListener {
                                         .and_then(|c| c.reply().ok())
                                         .map(|p| (p.root_x as i32, p.root_y as i32))
                                         .unwrap_or((0, 0));
-                                    last_text.clear();
+                                    dedup.clear();
+                                    pending_pos = None;
                                     let _ = tx.send(SelectionEvent::Cleared { pos });
                                 } else {
                                     // 用户划词产生了新的选区
                                     if debounce_ms > 0 {
-                                        std::thread::sleep(Duration::from_millis(debounce_ms));
+                                        let deadline = std::time::Instant::now()
+                                            + Duration::from_millis(debounce_ms);
+                                        while std::time::Instant::now() < deadline
+                                            && is_running.load(Ordering::SeqCst)
+                                        {
+                                            std::thread::sleep(Duration::from_millis(10));
+                                        }
                                     }
 
                                     // 智能消抖：检测鼠标左键是否仍在按住状态（即处于连续拖拽中）
                                     for _ in 0..10 {
+                                        if !is_running.load(Ordering::SeqCst) {
+                                            break;
+                                        }
                                         if let Some(reply) = xproto::query_pointer(&conn, root)
                                             .ok()
                                             .and_then(|c| c.reply().ok())
@@ -199,7 +462,10 @@ impl SelectionListener for LinuxX11SelectionListener {
                             }
                         }
                         x11rb::protocol::Event::SelectionNotify(notify) => {
-                            if notify.requestor == dummy_window && notify.selection == primary_atom {
+                            if notify.requestor == dummy_window
+                                && notify.selection == primary_atom
+                                && pending_pos.is_some()
+                            {
                                 let mut text = String::new();
 
                                 if notify.property != 0 {
@@ -219,29 +485,14 @@ impl SelectionListener for LinuxX11SelectionListener {
                                     }
                                 }
 
-                                // 备选方案：若部分窗口未按 ICCCM 规范响应属性，自动降级至系统级 xsel 捕获
-                                if text.trim().is_empty() {
-                                    if let Ok(out) = std::process::Command::new("xsel")
-                                        .arg("-o")
-                                        .output()
-                                    {
-                                        if out.status.success() {
-                                            text = String::from_utf8_lossy(&out.stdout).to_string();
-                                        }
-                                    }
-                                }
-
                                 let pos = pending_pos.take().unwrap_or((0, 0));
 
                                 if let Some(clean) =
                                     sanitize_selection_text(&text, min_length, max_length)
                                 {
-                                    if clean != last_text {
-                                        last_text = clean.clone();
-                                        let _ = tx.send(SelectionEvent::Selected {
-                                            text: clean,
-                                            pos,
-                                        });
+                                    if dedup.accept(&clean, Instant::now()) {
+                                        let _ =
+                                            tx.send(SelectionEvent::Selected { text: clean, pos });
                                     }
                                 }
                             }
@@ -250,9 +501,49 @@ impl SelectionListener for LinuxX11SelectionListener {
                     }
                 }
 
+                let _ = conn.destroy_window(dummy_window);
+                let _ = conn.flush();
                 is_running.store(false, Ordering::SeqCst);
+            })
+            .map_err(|e| {
+                self.is_running.store(false, Ordering::SeqCst);
+                e
             })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the synthetic PRIMARY owner from verify_desktop.py"]
+    fn reads_synthetic_primary_fixture() {
+        let started = Instant::now();
+        assert_eq!(get_current_selection(), Some("Hello world".into()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn same_word_is_allowed_after_repeat_window() {
+        let mut dedup = SelectionDedup::default();
+        let start = Instant::now();
+        assert!(dedup.accept("你好", start));
+        assert!(!dedup.accept("你好", start + Duration::from_millis(499)));
+        // Rejected duplicates do not extend the window.
+        assert!(dedup.accept("你好", start + Duration::from_millis(500)));
+        assert!(!dedup.accept("你好", start + Duration::from_millis(501)));
+        assert!(dedup.accept("世界", start + Duration::from_millis(502)));
+    }
+
+    #[test]
+    fn clearing_allows_immediate_reselection() {
+        let mut dedup = SelectionDedup::default();
+        let now = Instant::now();
+        assert!(dedup.accept("同词", now));
+        dedup.clear();
+        assert!(dedup.accept("同词", now + Duration::from_millis(1)));
     }
 }

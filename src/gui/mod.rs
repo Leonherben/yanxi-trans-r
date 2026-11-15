@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::cache::SQLiteCache;
 use crate::config::{AppConfig, SelectionMode};
 use crate::models::TranslationRequest;
-use crate::selection::{create_selection_listener, start_global_hotkey_listener, SelectionEvent};
+use crate::selection::{SelectionEvent, create_selection_listener, start_global_hotkey_listener};
 use crate::single_instance::{InstanceCheck, SingleInstance};
 use crate::translator::create_translator;
 use popup::PopupApp;
@@ -31,18 +31,21 @@ pub fn move_resize_x11(win: u32, x: i32, y: i32, w: u32, h: u32) {
         if opt.is_none() {
             if let Ok((conn, screen_num)) = x11rb::connect(None) {
                 use x11rb::protocol::xproto::ConnectionExt;
-                let atom_val = if let Ok(cookie) = conn.intern_atom(false, b"_NET_MOVERESIZE_WINDOW") {
-                    cookie.reply().map(|r| r.atom).ok()
-                } else {
-                    None
-                };
+                let atom_val =
+                    if let Ok(cookie) = conn.intern_atom(false, b"_NET_MOVERESIZE_WINDOW") {
+                        cookie.reply().map(|r| r.atom).ok()
+                    } else {
+                        None
+                    };
                 if let Some(atom) = atom_val {
                     *opt = Some((conn, screen_num, atom));
                 }
             }
         }
         if let Some((conn, screen_num, atom)) = opt.as_ref() {
-            use x11rb::protocol::xproto::{ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask};
+            use x11rb::protocol::xproto::{
+                ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask,
+            };
             let root = conn.setup().roots[*screen_num].root;
             let flags = 0x0F01u32; // NorthWest + x + y + w + h
             let data = [flags, x.max(0) as u32, y.max(0) as u32, w, h];
@@ -54,7 +57,12 @@ pub fn move_resize_x11(win: u32, x: i32, y: i32, w: u32, h: u32) {
                 type_: *atom,
                 data: ClientMessageData::from(data),
             };
-            if let Ok(cookie) = conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, event) {
+            if let Ok(cookie) = conn.send_event(
+                false,
+                root,
+                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                event,
+            ) {
                 let _ = cookie.check();
                 let _ = conn.flush();
             }
@@ -74,6 +82,102 @@ pub fn get_window_position_x11(win: u32) -> Option<(i32, i32)> {
         }
     }
     None
+}
+
+#[cfg(target_os = "linux")]
+/// Clear WM window states that override an explicit size (maximized/fullscreen).
+#[cfg(target_os = "linux")]
+pub fn clear_maximized_state_x11(win: u32) {
+    use x11rb::protocol::xproto::{
+        ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask,
+    };
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return;
+    };
+    let root = conn.setup().roots[screen_num].root;
+    let Ok(state) = conn.intern_atom(false, b"_NET_WM_STATE").map(|c| c.reply()) else {
+        return;
+    };
+    let Ok(state) = state else {
+        return;
+    };
+    for name in [
+        b"_NET_WM_STATE_MAXIMIZED_VERT".as_slice(),
+        b"_NET_WM_STATE_MAXIMIZED_HORZ".as_slice(),
+        b"_NET_WM_STATE_FULLSCREEN".as_slice(),
+    ] {
+        let Ok(atom) = conn.intern_atom(false, name).map(|c| c.reply()) else {
+            continue;
+        };
+        let Ok(atom) = atom else {
+            continue;
+        };
+        let event = ClientMessageEvent {
+            response_type: x11rb::protocol::xproto::CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window: win,
+            type_: state.atom,
+            data: ClientMessageData::from([0u32, atom.atom, 0, 1, 0]),
+        };
+        let _ = conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        );
+    }
+    let _ = conn.flush();
+}
+
+pub fn get_window_geometry_x11(win: u32) -> Option<((f32, f32), (f32, f32))> {
+    use x11rb::protocol::xproto::ConnectionExt;
+    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots[screen_num].root;
+    let position = conn
+        .translate_coordinates(win, root, 0, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    let size = conn.get_geometry(win).ok()?.reply().ok()?;
+    Some((
+        (position.dst_x as f32, position.dst_y as f32),
+        (size.width as f32, size.height as f32),
+    ))
+}
+
+/// State geometry is always in physical pixels. Do not send a second logical
+/// move after a native X11 move: mixed units make windows jump at 2x scaling.
+pub fn apply_window_geometry(
+    ctx: &eframe::egui::Context,
+    window: Option<u32>,
+    pos: (f32, f32),
+    size: (f32, f32),
+) {
+    #[cfg(target_os = "linux")]
+    if let Some(window) = window {
+        move_resize_x11(
+            window,
+            pos.0.round() as i32,
+            pos.1.round() as i32,
+            size.0.round() as u32,
+            size.1.round() as u32,
+        );
+        return;
+    }
+    let scale = ctx.pixels_per_point();
+    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::OuterPosition(
+        eframe::egui::pos2(pos.0 / scale, pos.1 / scale),
+    ));
+    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
+        eframe::egui::vec2(size.0 / scale, size.1 / scale),
+    ));
+}
+
+pub fn default_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
+    let w = (screen_w * 0.30).clamp(420.0, 760.0).round();
+    let h = (screen_h * 0.35).clamp(300.0, 560.0).round();
+    (w, h)
 }
 
 pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -130,39 +234,61 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         lock.tx_hotkey = Some(tx_hotkey);
     }
     let state_hotkey = Arc::clone(&state);
+    let state_hotkey_status = Arc::clone(&state);
     let initial_hotkey = config.selection.hotkey.clone();
-    start_global_hotkey_listener(initial_hotkey, rx_hotkey, move || {
-        if let Ok(mut lock) = state_hotkey.lock() {
-            lock.is_visible = !lock.is_visible;
-            if lock.is_visible && !lock.is_pinned {
-                #[cfg(target_os = "linux")]
-                {
-                    if let Ok((conn, screen_num)) = x11rb::connect(None) {
-                        use x11rb::protocol::xproto::ConnectionExt;
-                        let root = conn.setup().roots[screen_num].root;
-                        let s_w = conn.setup().roots[screen_num].width_in_pixels as f32;
-                        let s_h = conn.setup().roots[screen_num].height_in_pixels as f32;
-                        lock.screen_size = (s_w, s_h);
-                        if let Ok(cookie) = conn.query_pointer(root) {
-                            if let Ok(reply) = cookie.reply() {
-                                let (px, py) = (reply.root_x as i32, reply.root_y as i32);
-                                lock.cursor_pos = (px, py);
-                                let win_w = if s_w > 2000.0 { 1000.0 } else { 500.0 };
-                                let win_h = if s_h > 1200.0 { 640.0 } else { 320.0 };
-                                let target_pos = SharedPopupState::compute_target_pos(px, py, win_w, win_h, s_w, s_h);
-                                lock.window_pos = Some(target_pos);
-                                if let Some(win) = lock.x11_window {
-                                    move_resize_x11(win, target_pos.0 as i32, target_pos.1 as i32, win_w as u32, win_h as u32);
+    start_global_hotkey_listener(
+        initial_hotkey,
+        rx_hotkey,
+        move || {
+            // Read only the current selection, never a previously copied clipboard item.
+            // The selection helper has a bounded wait and runs outside the state lock.
+            let selection = crate::selection::get_current_selection();
+            if let Ok(mut lock) = state_hotkey.lock() {
+                apply_hotkey_selection(&mut lock, selection.as_deref());
+                if lock.is_visible && !lock.is_pinned {
+                    #[cfg(target_os = "linux")]
+                    {
+                        if let Ok((conn, screen_num)) = x11rb::connect(None) {
+                            use x11rb::protocol::xproto::ConnectionExt;
+                            let root = conn.setup().roots[screen_num].root;
+                            let s_w = conn.setup().roots[screen_num].width_in_pixels as f32;
+                            let s_h = conn.setup().roots[screen_num].height_in_pixels as f32;
+                            lock.screen_size = (s_w, s_h);
+                            if let Ok(cookie) = conn.query_pointer(root) {
+                                if let Ok(reply) = cookie.reply() {
+                                    let (px, py) = (reply.root_x as i32, reply.root_y as i32);
+                                    lock.cursor_pos = (px, py);
+                                    let (win_w, win_h) = lock.window_size;
+                                    let target_pos = SharedPopupState::compute_target_pos(
+                                        px, py, win_w, win_h, s_w, s_h,
+                                    );
+                                    lock.window_pos = Some(target_pos);
+                                    if let Some(win) = lock.x11_window {
+                                        move_resize_x11(
+                                            win,
+                                            target_pos.0 as i32,
+                                            target_pos.1 as i32,
+                                            win_w as u32,
+                                            win_h as u32,
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
+                    lock.should_update_pos = true;
                 }
-                lock.should_update_pos = true;
+                lock.request_repaint();
             }
-            lock.request_repaint();
-        }
-    });
+        },
+        move |ok, message| {
+            println!("[Yanxi Hotkey] {message}");
+            if let Ok(mut lock) = state_hotkey_status.lock() {
+                lock.hotkey_feedback = Some((ok, message));
+                lock.request_repaint();
+            }
+        },
+    );
 
     // 6. 启动后台 Tokio 异步工作运行时
     let state_clone = Arc::clone(&state);
@@ -189,10 +315,25 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })?;
 
     // 7. 在主线程启动 eframe 原生无边框透明视口 (使用 OpenGL Glow 后端，配合 Utility 窗口类型消除 X11 屏闪)
+    #[cfg(target_os = "linux")]
+    let (init_w, init_h) = x11rb::connect(None)
+        .ok()
+        .map(|(conn, screen_num)| {
+            let root = &conn.setup().roots[screen_num];
+            default_window_size(root.width_in_pixels as f32, root.height_in_pixels as f32)
+        })
+        .unwrap_or((500.0, 320.0));
+    #[cfg(not(target_os = "linux"))]
+    let (init_w, init_h) = (500.0, 320.0);
+
+    if let Ok(mut lock) = state.lock() {
+        lock.window_size = (init_w, init_h);
+    }
+
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([500.0, 320.0])
+            .with_inner_size([init_w, init_h])
             .with_min_inner_size([380.0, 220.0])
             .with_decorations(false)
             .with_transparent(true)
@@ -203,70 +344,6 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..Default::default()
     };
 
-    // 启动后异步增强 X11 窗口属性：设置 _NET_WM_STATE_SKIP_TASKBAR, SKIP_PAGER, ABOVE 并预置紧凑尺寸
-    let state_x11 = Arc::clone(&state);
-    #[cfg(target_os = "linux")]
-    std::thread::spawn(move || {
-        let Ok((conn, screen_num)) = x11rb::connect(None) else { return; };
-        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, PropMode};
-        let root = conn.setup().roots[screen_num].root;
-        let screen_w = conn.setup().roots[screen_num].width_in_pixels as f32;
-        let screen_h = conn.setup().roots[screen_num].height_in_pixels as f32;
-
-        let Ok(net_wm_name) = conn.intern_atom(false, b"_NET_WM_NAME") else { return; };
-        let Ok(net_wm_name_atom) = net_wm_name.reply() else { return; };
-        let Ok(state_atom) = conn.intern_atom(false, b"_NET_WM_STATE") else { return; };
-        let Ok(state_atom_r) = state_atom.reply() else { return; };
-        let Ok(skip_taskbar) = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR") else { return; };
-        let Ok(skip_taskbar_r) = skip_taskbar.reply() else { return; };
-        let Ok(skip_pager) = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_PAGER") else { return; };
-        let Ok(skip_pager_r) = skip_pager.reply() else { return; };
-        let Ok(above) = conn.intern_atom(false, b"_NET_WM_STATE_ABOVE") else { return; };
-        let Ok(above_r) = above.reply() else { return; };
-
-        for _ in 0..50 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if let Ok(cookie) = conn.query_tree(root) {
-                if let Ok(tree) = cookie.reply() {
-                for win in tree.children {
-                    if let Ok(name_prop) = conn.get_property(false, win, net_wm_name_atom.atom, AtomEnum::ANY, 0, 128) {
-                        if let Ok(name_reply) = name_prop.reply() {
-                            let name = String::from_utf8_lossy(&name_reply.value);
-                            if name.contains("yanxi-popup") {
-                                let states = [skip_taskbar_r.atom, skip_pager_r.atom, above_r.atom];
-                                let _ = conn.change_property32(
-                                    PropMode::APPEND,
-                                    win,
-                                    state_atom_r.atom,
-                                    AtomEnum::ATOM,
-                                    &states,
-                                );
-                                let _ = conn.flush();
-
-                                let init_w = if screen_w > 2000.0 { 1000 } else { 500 };
-                                let init_h = if screen_h > 1200.0 { 640 } else { 320 };
-                                let init_x = ((screen_w - init_w as f32) / 2.0).max(10.0) as i32;
-                                let init_y = ((screen_h - init_h as f32) / 2.0).max(10.0) as i32;
-                                move_resize_x11(win, init_x, init_y, init_w, init_h);
-
-                                if let Ok(mut lock) = state_x11.lock() {
-                                    lock.x11_window = Some(win);
-                                    lock.screen_size = (screen_w, screen_h);
-                                    lock.window_pos = Some((init_x as f32, init_y as f32));
-                                    lock.window_size = (init_w as f32, init_h as f32);
-                                }
-
-                                println!("[Yanxi GUI] 🪟 X11 浮窗属性增强就绪: Utility + SkipTaskbar + SkipPager + Above, 初始尺寸: {}x{}", init_w, init_h);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-});
-
     let state_app = Arc::clone(&state);
     eframe::run_native(
         "yanxi-popup",
@@ -275,6 +352,16 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             // 使用清新优雅的明亮主题，圆润高对比
             cc.egui_ctx.set_visuals(eframe::egui::Visuals::light());
             fonts::configure_cjk_fonts(&cc.egui_ctx);
+            // Use our own native handle: matching windows by title can bind to a
+            // different yanxi window when several instances are visible.
+            #[cfg(target_os = "linux")]
+            if let Some(win) = find_own_popup_window(std::process::id()) {
+                apply_popup_window_role(win);
+                center_popup_window(win);
+                if let Ok(mut lock) = state_app.lock() {
+                    lock.x11_window = Some(win);
+                }
+            }
             if let Ok(mut lock) = state_app.lock() {
                 lock.ctx = Some(cc.egui_ctx.clone());
             }
@@ -286,6 +373,137 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+/// Find our own popup window by the process id the toolkit publishes.
+/// Matching the title alone can select another running translation window.
+#[cfg(target_os = "linux")]
+fn find_own_popup_window(pid: u32) -> Option<u32> {
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots[screen_num].root;
+    let pid_atom = conn
+        .intern_atom(false, b"_NET_WM_PID")
+        .ok()?
+        .reply()
+        .ok()?
+        .atom;
+    let name_atom = conn
+        .intern_atom(false, b"_NET_WM_NAME")
+        .ok()?
+        .reply()
+        .ok()?
+        .atom;
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let tree = conn.query_tree(root).ok()?.reply().ok()?;
+        for win in tree.children {
+            let name = conn
+                .get_property(false, win, name_atom, AtomEnum::ANY, 0, 128)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
+                .unwrap_or_default();
+            if !name.contains("yanxi-popup") {
+                continue;
+            }
+            let owner = conn
+                .get_property(false, win, pid_atom, AtomEnum::CARDINAL, 0, 1)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .and_then(|reply| reply.value32().and_then(|mut values| values.next()));
+            if owner == Some(pid) {
+                return Some(win);
+            }
+        }
+    }
+    None
+}
+
+/// Mark the window as a non-taskbar popup and keep it above normal windows.
+#[cfg(target_os = "linux")]
+fn apply_popup_window_role(win: u32) {
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return;
+    };
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, PropMode};
+    let Ok(state_atom) = conn.intern_atom(false, b"_NET_WM_STATE").map(|c| c.reply()) else {
+        return;
+    };
+    let Ok(state_atom) = state_atom else {
+        return;
+    };
+    let atoms: Vec<u32> = [
+        "_NET_WM_STATE_SKIP_TASKBAR",
+        "_NET_WM_STATE_SKIP_PAGER",
+        "_NET_WM_STATE_ABOVE",
+    ]
+    .iter()
+    .filter_map(|name| conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok())
+    .map(|reply| reply.atom)
+    .collect();
+    let _ = conn.change_property32(
+        PropMode::APPEND,
+        win,
+        state_atom.atom,
+        AtomEnum::ATOM,
+        &atoms,
+    );
+    let _ = conn.flush();
+    let _ = screen_num;
+}
+
+/// Place a newly mapped window at the stored (or screen-centred) position.
+#[cfg(target_os = "linux")]
+fn center_popup_window(win: u32) {
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return;
+    };
+    let screen = &conn.setup().roots[screen_num];
+    let (sw, sh) = (
+        screen.width_in_pixels as f32,
+        screen.height_in_pixels as f32,
+    );
+    let (w, h) = default_window_size(sw, sh);
+    move_resize_x11(
+        win,
+        ((sw - w) / 2.0).max(10.0) as i32,
+        ((sh - h) / 2.0).max(10.0) as i32,
+        w as u32,
+        h as u32,
+    );
+}
+
+fn apply_hotkey_selection(state: &mut SharedPopupState, selection: Option<&str>) {
+    match selection {
+        Some(text) => match crate::selection::validate_selection_text(text) {
+            Ok(clean) if state.is_visible && clean == state.edit_text && !state.show_settings => {
+                state.is_visible = false;
+                state.show_settings = false;
+            }
+            Ok(clean) => {
+                state.is_visible = true;
+                state.show_settings = false;
+                state.edit_text = clean.clone();
+                state.trigger_translate(&clean);
+            }
+            Err(message) => {
+                state.is_visible = true;
+                state.show_settings = false;
+                state.status = TranslationStatus::Error {
+                    original_text: String::new(),
+                    message,
+                };
+            }
+        },
+        None => {
+            state.is_visible = !state.is_visible;
+            if !state.is_visible {
+                state.show_settings = false;
+            }
+        }
+    }
+    state.request_repaint();
+}
+
 async fn handle_worker_events(
     mut rx_sel: UnboundedReceiver<SelectionEvent>,
     mut rx_cmd: UnboundedReceiver<GuiCommand>,
@@ -293,12 +511,15 @@ async fn handle_worker_events(
     mut config: AppConfig,
     cache: SQLiteCache,
 ) {
+    let mut next_request_id: u64 = 0;
+    let mut latest_handle: Option<tokio::task::JoinHandle<()>> = None;
+
     loop {
         tokio::select! {
             Some(event) = rx_sel.recv() => {
                 match event {
                     SelectionEvent::Selected { text, pos } => {
-                        let (mode, is_visible, is_pinned, s_w, s_h, x11_win) = {
+                        let (mode, is_visible, is_pinned, s_w, s_h, x11_win, window_size) = {
                             let lock = match state.lock() {
                                 Ok(l) => l,
                                 Err(_) => continue,
@@ -310,6 +531,7 @@ async fn handle_worker_events(
                                 lock.screen_size.0,
                                 lock.screen_size.1,
                                 lock.x11_window,
+                                lock.window_size,
                             )
                         };
 
@@ -323,8 +545,7 @@ async fn handle_worker_events(
                             continue;
                         }
 
-                        let win_w = if s_w > 2000.0 { 1000.0 } else { 500.0 };
-                        let win_h = if s_h > 1200.0 { 640.0 } else { 320.0 };
+                        let (win_w, win_h) = window_size;
                         let target_pos = SharedPopupState::compute_target_pos(pos.0, pos.1, win_w, win_h, s_w, s_h);
                         println!("[Yanxi GUI] 划词事件触发 @ ({}, {}): \"{}\"", pos.0, pos.1, text);
 
@@ -355,7 +576,31 @@ async fn handle_worker_events(
                             )
                         };
 
-                        perform_translation(&text, &source_lang, &target_lang, &provider_name, &config, &cache, &state).await;
+                        next_request_id += 1;
+                        let req_id = next_request_id;
+                        if let Ok(mut lock) = state.lock() {
+                            lock.request_seq = req_id;
+                            lock.request_repaint();
+                        }
+                        if let Some(handle) = latest_handle.take() {
+                            handle.abort();
+                        }
+                        let state_task = Arc::clone(&state);
+                        let cache_task = cache.clone();
+                        let config_task = config.clone();
+                        latest_handle = Some(tokio::spawn(async move {
+                            perform_translation(
+                                text,
+                                source_lang,
+                                target_lang,
+                                provider_name,
+                                config_task,
+                                cache_task,
+                                state_task,
+                                req_id,
+                            )
+                            .await;
+                        }));
                     }
                     SelectionEvent::Cleared { .. } => {
                         // 选区取消时不粗暴关闭悬浮窗，保留窗口供用户查阅译文、发音及复制。
@@ -367,36 +612,56 @@ async fn handle_worker_events(
                 match cmd {
                     GuiCommand::Translate { text, source_lang, target_lang, provider } => {
                         println!("[Yanxi GUI] 交互翻译请求: \"{}\" -> [{} ({})]", text, provider, target_lang);
-                        perform_translation(&text, &source_lang, &target_lang, &provider, &config, &cache, &state).await;
+                        next_request_id += 1;
+                        let req_id = next_request_id;
+                        if let Ok(mut lock) = state.lock() {
+                            lock.request_seq = req_id;
+                            lock.request_repaint();
+                        }
+                        if let Some(handle) = latest_handle.take() {
+                            handle.abort();
+                        }
+                        let state_task = Arc::clone(&state);
+                        let cache_task = cache.clone();
+                        let config_task = config.clone();
+                        latest_handle = Some(tokio::spawn(async move {
+                            perform_translation(
+                                text,
+                                source_lang,
+                                target_lang,
+                                provider,
+                                config_task,
+                                cache_task,
+                                state_task,
+                                req_id,
+                            )
+                            .await;
+                        }));
                     }
                     GuiCommand::TestProvider { provider_name, provider_config } => {
                         println!("[Yanxi GUI] 连通性测试: [{}]", provider_name);
-                        let translator = create_translator(&provider_config);
-                        let req = TranslationRequest::with_langs("Hello", "en", "zh-CN");
-                        match translator.translate(&req).await {
-                            Ok(res) if res.is_success() => {
-                                if let Ok(mut lock) = state.lock() {
-                                    lock.test_feedback = Some((true, format!("✅ 连接正常 (耗时 {:.0}ms)", res.latency_ms)));
-                                    lock.request_repaint();
+                        let state_task = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            let translator = create_translator(&provider_config);
+                            let req = TranslationRequest::with_langs("Hello", "en", "zh-CN");
+                            let feedback = match translator.translate(&req).await {
+                                Ok(res) if res.is_success() => {
+                                    (true, format!("连接正常 (耗时 {:.0}ms)", res.latency_ms))
                                 }
+                                Ok(res) => (false, format!("接口返回错误: {}", res.translated_text)),
+                                Err(e) => (false, format!("连接失败: {e}")),
+                            };
+                            if let Ok(mut lock) = state_task.lock() {
+                                lock.test_feedback = Some(feedback);
+                                lock.request_repaint();
                             }
-                            Ok(res) => {
-                                if let Ok(mut lock) = state.lock() {
-                                    lock.test_feedback = Some((false, format!("❌ 接口返回错误: {}", res.translated_text)));
-                                    lock.request_repaint();
-                                }
-                            }
-                            Err(e) => {
-                                if let Ok(mut lock) = state.lock() {
-                                    lock.test_feedback = Some((false, format!("❌ 连接失败: {e}")));
-                                    lock.request_repaint();
-                                }
-                            }
-                        }
+                        });
                     }
                     GuiCommand::PlayTts { text, accent } => {
-                        println!("[Yanxi GUI] 🔊 播放发音: \"{}\" ({:?})", text, accent);
-                        crate::tts::play_pronunciation(&text, accent).await;
+                        println!("[Yanxi GUI] 播放发音: \"{}\" ({:?})", text, accent);
+                        tokio::spawn(async move {
+                            crate::tts::play_pronunciation(&text, accent).await;
+                        });
                     }
                     GuiCommand::SaveConfig(new_cfg) => {
                         let _ = new_cfg.save();
@@ -410,13 +675,14 @@ async fn handle_worker_events(
 }
 
 async fn perform_translation(
-    text: &str,
-    source_lang: &str,
-    target_lang: &str,
-    provider_name: &str,
-    config: &AppConfig,
-    cache: &SQLiteCache,
-    state: &Arc<Mutex<SharedPopupState>>,
+    text: String,
+    source_lang: String,
+    target_lang: String,
+    provider_name: String,
+    config: AppConfig,
+    cache: SQLiteCache,
+    state: Arc<Mutex<SharedPopupState>>,
+    request_id: u64,
 ) {
     let effective_target = if (source_lang == "auto" || source_lang == "zh-CN")
         && target_lang == "zh-CN"
@@ -424,64 +690,169 @@ async fn perform_translation(
     {
         "en"
     } else {
-        target_lang
+        target_lang.as_str()
     };
-    let req = TranslationRequest::with_langs(text, source_lang, effective_target);
+    let req = TranslationRequest::with_langs(&text, &source_lang, effective_target);
+
+    if !is_latest(&state, request_id) {
+        return;
+    }
 
     // 1. 本地缓存秒开
-    if let Some(cached) = cache.get(&req, provider_name) {
-        println!("[Yanxi GUI] ⚡ 本地缓存命中: \"{}\"", cached.translated_text);
-        if let Ok(mut lock) = state.lock() {
-            lock.status = TranslationStatus::Success(cached);
-            lock.request_repaint();
-        }
+    if let Some(cached) = cache.get(&req, &provider_name) {
+        println!("[Yanxi GUI] 本地缓存命中: \"{}\"", cached.translated_text);
+        publish_status(&state, request_id, TranslationStatus::Success(cached));
         return;
     }
 
     // 2. 调用服务商接口
-    let provider_cfg = match config.providers.get(provider_name) {
+    let provider_cfg = match config.providers.get(&provider_name) {
         Some(cfg) => cfg,
         None => {
-            if let Ok(mut lock) = state.lock() {
-                lock.status = TranslationStatus::Error {
-                    original_text: text.to_string(),
+            publish_status(
+                &state,
+                request_id,
+                TranslationStatus::Error {
+                    original_text: text.clone(),
                     message: format!("找不到服务商 [{provider_name}] 配置"),
-                };
-                lock.request_repaint();
-            }
+                },
+            );
             return;
         }
     };
 
     let translator = create_translator(provider_cfg);
-    match translator.translate(&req).await {
+    let outcome = translator.translate(&req).await;
+
+    if !is_latest(&state, request_id) {
+        println!("[Yanxi GUI] 丢弃过期翻译结果 (请求 #{request_id})");
+        return;
+    }
+
+    match outcome {
         Ok(res) if res.is_success() => {
-            println!("[Yanxi GUI] ✅ 翻译完成 [{:.0}ms]: \"{}\"", res.latency_ms, res.translated_text);
+            println!(
+                "[Yanxi GUI] 翻译完成 [{:.0}ms]: \"{}\"",
+                res.latency_ms, res.translated_text
+            );
             cache.put(&res);
-            if let Ok(mut lock) = state.lock() {
-                lock.status = TranslationStatus::Success(res);
-                lock.request_repaint();
-            }
+            publish_status(&state, request_id, TranslationStatus::Success(res));
         }
         Ok(res) => {
-            eprintln!("[Yanxi GUI] ❌ 翻译失败: {}", res.translated_text);
-            if let Ok(mut lock) = state.lock() {
-                lock.status = TranslationStatus::Error {
-                    original_text: text.to_string(),
+            eprintln!("[Yanxi GUI] 翻译失败: {}", res.translated_text);
+            publish_status(
+                &state,
+                request_id,
+                TranslationStatus::Error {
+                    original_text: text,
                     message: res.translated_text,
-                };
-                lock.request_repaint();
-            }
+                },
+            );
         }
         Err(e) => {
-            eprintln!("[Yanxi GUI] ❌ 请求异常: {e}");
-            if let Ok(mut lock) = state.lock() {
-                lock.status = TranslationStatus::Error {
-                    original_text: text.to_string(),
+            eprintln!("[Yanxi GUI] 请求异常: {e}");
+            publish_status(
+                &state,
+                request_id,
+                TranslationStatus::Error {
+                    original_text: text,
                     message: e.to_string(),
-                };
-                lock.request_repaint();
-            }
+                },
+            );
         }
+    }
+}
+
+fn publish_status(
+    state: &Arc<Mutex<SharedPopupState>>,
+    request_id: u64,
+    status: TranslationStatus,
+) {
+    // Compare and publish under the same lock: an old request must not replace
+    // the state after a newer request has become active.
+    if let Ok(mut lock) = state.lock() {
+        if lock.request_seq == request_id {
+            lock.status = status;
+            lock.request_repaint();
+        }
+    }
+}
+
+fn is_latest(state: &Arc<Mutex<SharedPopupState>>, request_id: u64) -> bool {
+    state
+        .lock()
+        .map(|lock| lock.request_seq == request_id)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcut_translates_selection_then_hides_and_reopens_same_word() {
+        let mut config = AppConfig::default();
+        config.ui.start_hidden = true;
+        let mut state = SharedPopupState::new(&config);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state.tx_command = Some(tx);
+        apply_hotkey_selection(&mut state, Some(" Hello world "));
+        assert!(state.is_visible);
+        assert_eq!(state.edit_text, "Hello world");
+        assert!(
+            matches!(rx.try_recv().unwrap(), GuiCommand::Translate { text, .. } if text == "Hello world")
+        );
+        apply_hotkey_selection(&mut state, Some("Hello world"));
+        assert!(!state.is_visible);
+        assert!(rx.try_recv().is_err());
+        apply_hotkey_selection(&mut state, Some("Hello world"));
+        assert!(state.is_visible);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            GuiCommand::Translate { .. }
+        ));
+    }
+
+    #[test]
+    fn empty_selection_only_toggles_and_oversized_selection_does_not_send_request() {
+        let mut state = SharedPopupState::new(&AppConfig::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state.tx_command = Some(tx);
+        state.is_visible = false;
+        apply_hotkey_selection(&mut state, None);
+        assert!(state.is_visible);
+        assert!(state.edit_text.is_empty());
+        assert!(rx.try_recv().is_err());
+        apply_hotkey_selection(&mut state, Some(&"中".repeat(3001)));
+        assert!(matches!(state.status, TranslationStatus::Error { .. }));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn late_translation_does_not_replace_current_request() {
+        let state = Arc::new(Mutex::new(SharedPopupState::new(&AppConfig::default())));
+        state.lock().unwrap().request_seq = 2;
+        let current = TranslationStatus::Loading {
+            original_text: "latest".into(),
+        };
+        publish_status(&state, 2, current.clone());
+        publish_status(
+            &state,
+            1,
+            TranslationStatus::Error {
+                original_text: "old".into(),
+                message: "late error".into(),
+            },
+        );
+        assert_eq!(state.lock().unwrap().status, current);
+    }
+
+    #[test]
+    fn test_default_window_size_clamps() {
+        assert_eq!(default_window_size(1366.0, 768.0), (420.0, 300.0));
+        assert_eq!(default_window_size(1920.0, 1080.0), (576.0, 378.0));
+        assert_eq!(default_window_size(2560.0, 1440.0), (760.0, 504.0));
+        assert_eq!(default_window_size(3440.0, 1440.0), (760.0, 504.0));
+        assert_eq!(default_window_size(800.0, 600.0), (420.0, 300.0));
     }
 }

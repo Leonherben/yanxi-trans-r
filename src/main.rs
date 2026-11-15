@@ -1,6 +1,6 @@
 use clap::Parser;
 use colored::*;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use yanxi_trans_r::cache::SQLiteCache;
 use yanxi_trans_r::config::AppConfig;
 use yanxi_trans_r::models::TranslationRequest;
@@ -10,7 +10,7 @@ use yanxi_trans_r::translator::create_translator;
 #[command(
     name = "yanxi-cli",
     about = "言蹊翻译 - 极简极速跨平台划词翻译核心终端工具 (Rust)",
-    version = "0.1.0"
+    version = env!("CARGO_PKG_VERSION")
 )]
 struct Cli {
     /// 待翻译文本（支持传入多个词或通过管道输入）
@@ -160,6 +160,9 @@ async fn do_translate(
     if json_output {
         let _ = serde_json::to_writer_pretty(io::stdout(), &res);
         println!();
+        if !no_cache && res.is_success() {
+            cache.put(&res);
+        }
     } else {
         // 清除正在翻译的提示
         print!("\r{}\r", " ".repeat(60));
@@ -454,7 +457,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cli.text.join(" ")
     } else if !io::stdin().is_terminal() {
         let mut buffer = String::new();
-        io::stdin().lock().read_line(&mut buffer)?;
+        io::stdin().lock().read_to_string(&mut buffer)?;
         buffer.trim().to_string()
     } else {
         String::new()

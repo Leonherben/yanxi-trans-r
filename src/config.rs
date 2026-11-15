@@ -32,9 +32,9 @@ impl Default for ProviderConfig {
 #[serde(rename_all = "lowercase")]
 pub enum SelectionMode {
     #[default]
-    Automatic,  // 划选即翻译 (默认)：任意划选自动弹窗显示在词下方
-    Companion,  // 伴随阅读：仅浮窗可见/固定时划词才自动刷新；关闭时静默
-    Manual,     // 手动模式：划选不弹窗
+    Automatic, // 划选即翻译 (默认)：任意划选自动弹窗显示在词下方
+    Companion, // 伴随阅读：仅浮窗可见/固定时划词才自动刷新；关闭时静默
+    Manual,    // 手动模式：划选不弹窗
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,16 +95,19 @@ impl SelectionConfig {
 pub struct UIConfig {
     #[serde(default = "default_splitter_ratio")]
     pub splitter_ratio: f32,
+    #[serde(default)]
+    pub start_hidden: bool,
 }
 
 fn default_splitter_ratio() -> f32 {
-    0.45
+    0.33
 }
 
 impl Default for UIConfig {
     fn default() -> Self {
         Self {
             splitter_ratio: default_splitter_ratio(),
+            start_hidden: false,
         }
     }
 }
@@ -181,7 +184,8 @@ impl Default for AppConfig {
                 api_key: "".into(),
                 model: "glm-4-flash".into(),
                 timeout_seconds: 15.0,
-                system_prompt: "You are a professional translator. Translate naturally and concisely.".into(),
+                system_prompt:
+                    "You are a professional translator. Translate naturally and concisely.".into(),
             },
         );
 
@@ -195,7 +199,8 @@ impl Default for AppConfig {
                 api_key: "ollama".into(),
                 model: "qwen2.5:1.5b".into(),
                 timeout_seconds: 20.0,
-                system_prompt: "You are a professional translator. Translate naturally and concisely.".into(),
+                system_prompt:
+                    "You are a professional translator. Translate naturally and concisely.".into(),
             },
         );
 
@@ -223,19 +228,30 @@ impl AppConfig {
         let path = Self::config_path();
         if path.exists() {
             if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(mut config) = serde_json::from_str::<Self>(&content) {
-                    let default_cfg = Self::default();
-                    let mut modified = false;
-                    for (k, v) in default_cfg.providers {
-                        if !config.providers.contains_key(&k) {
-                            config.providers.insert(k, v);
-                            modified = true;
+                match serde_json::from_str::<Self>(&content) {
+                    Ok(mut config) => {
+                        let default_cfg = Self::default();
+                        let mut modified = false;
+                        for (k, v) in default_cfg.providers {
+                            if !config.providers.contains_key(&k) {
+                                config.providers.insert(k, v);
+                                modified = true;
+                            }
                         }
+                        if modified {
+                            let _ = config.save();
+                        }
+                        return config;
                     }
-                    if modified {
-                        let _ = config.save();
+                    Err(e) => {
+                        let backup = path.with_extension("json.bak");
+                        let _ = fs::copy(&path, &backup);
+                        eprintln!(
+                            "⚠️ 配置文件解析失败: {e}；原文件已备份至 {}，本次将使用默认配置且不会覆盖原文件。",
+                            backup.display()
+                        );
+                        return Self::default();
                     }
-                    return config;
                 }
             }
         }
@@ -250,7 +266,13 @@ impl AppConfig {
             fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)
+        fs::write(&path, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
     }
 
     pub fn get_active_provider_config(&self) -> ProviderConfig {
@@ -269,10 +291,37 @@ mod tests {
     fn test_default_config() {
         let config = AppConfig::default();
         assert_eq!(config.selection.hotkey, "alt+q");
-        assert_eq!(config.ui.splitter_ratio, 0.45);
+        assert_eq!(config.ui.splitter_ratio, 0.33);
+        assert!(!config.ui.start_hidden);
         assert_eq!(config.active_provider, "microsoft");
         assert_eq!(config.source_lang, "auto");
         assert_eq!(config.target_lang, "zh-CN");
     }
 }
 
+#[cfg(test)]
+mod ui_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_configs_keep_their_ratio_and_start_visible() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("ui");
+        let config: AppConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(config.ui.splitter_ratio, 0.33);
+        assert!(!config.ui.start_hidden);
+        value["ui"] = serde_json::json!({"splitter_ratio": 0.61});
+        let config: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.ui.splitter_ratio, 0.61);
+        assert!(!config.ui.start_hidden);
+    }
+
+    #[test]
+    fn hidden_preference_round_trips() {
+        let mut config = AppConfig::default();
+        config.ui.start_hidden = true;
+        let loaded: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(loaded.ui.start_hidden);
+    }
+}

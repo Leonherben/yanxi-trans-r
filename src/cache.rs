@@ -21,6 +21,8 @@ impl SQLiteCache {
         let db_path = dir.join("cache.db");
 
         let conn = Connection::open(&db_path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))?;
+        let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS translation_cache (
@@ -95,6 +97,8 @@ impl SQLiteCache {
             .ok()?;
 
         if let Some(Ok(res)) = rows.next() {
+            drop(rows);
+            drop(stmt);
             let _ = conn.execute(
                 "UPDATE translation_cache SET access_count = access_count + 1, last_accessed_at = CURRENT_TIMESTAMP WHERE hash_key = ?1",
                 params![hash_key],
@@ -134,6 +138,8 @@ impl SQLiteCache {
                 .ok()?;
 
             if let Some(Ok((hk, res))) = rows2.next() {
+                drop(rows2);
+                drop(stmt2);
                 let _ = conn.execute(
                     "UPDATE translation_cache SET access_count = access_count + 1, last_accessed_at = CURRENT_TIMESTAMP WHERE hash_key = ?1",
                     params![hk],
@@ -158,7 +164,7 @@ impl SQLiteCache {
         );
 
         if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "INSERT INTO translation_cache (
                     hash_key, original_text, translated_text, source_lang, target_lang, provider, latency_ms, last_accessed_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
@@ -176,7 +182,9 @@ impl SQLiteCache {
                     res.provider,
                     res.latency_ms
                 ],
-            );
+            ) {
+                eprintln!("[Yanxi Cache] 写入缓存失败: {e}");
+            }
         }
     }
 

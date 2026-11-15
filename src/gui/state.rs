@@ -1,8 +1,8 @@
-use std::time::Instant;
-use tokio::sync::mpsc::UnboundedSender;
 use crate::config::{AppConfig, ProviderConfig, SelectionMode};
 use crate::models::TranslationResult;
 use crate::tts::Accent;
+use std::time::Instant;
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranslationStatus {
@@ -64,6 +64,8 @@ pub struct SharedPopupState {
     pub settings_model: String,
     pub settings_hotkey: String,
     pub test_feedback: Option<(bool, String)>,
+    /// Set by the hotkey registration callback, independently of config saving.
+    pub hotkey_feedback: Option<(bool, String)>,
 
     // 交互与显示
     pub splitter_ratio: f32,
@@ -74,6 +76,7 @@ pub struct SharedPopupState {
     pub tx_hotkey: Option<std::sync::mpsc::Sender<String>>,
     pub x11_window: Option<u32>,
     pub screen_size: (f32, f32),
+    pub request_seq: u64,
 }
 
 impl SharedPopupState {
@@ -95,13 +98,13 @@ impl SharedPopupState {
         }
 
         Self {
-            is_visible: false,
+            is_visible: !config.ui.start_hidden,
             is_pinned: false,
             selection_mode: config.selection.get_mode(),
             status: TranslationStatus::Idle,
             cursor_pos: (0, 0),
             window_pos: None,
-            window_size: (1000.0, 640.0),
+            window_size: (500.0, 320.0),
             should_update_pos: false,
             edit_text: String::new(),
             active_provider: active_p.clone(),
@@ -115,6 +118,7 @@ impl SharedPopupState {
             settings_model: p_cfg.model,
             settings_hotkey: config.selection.hotkey.clone(),
             test_feedback: None,
+            hotkey_feedback: None,
             splitter_ratio: config.ui.splitter_ratio.clamp(0.2, 0.8),
             only_translation: false,
             copy_feedback_time: None,
@@ -123,14 +127,22 @@ impl SharedPopupState {
             tx_hotkey: None,
             x11_window: None,
             screen_size: (1920.0, 1080.0),
+            request_seq: 0,
         }
     }
 
     pub fn trigger_translate(&mut self, text: &str) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return;
-        }
+        let trimmed = match crate::selection::validate_selection_text(text) {
+            Ok(text) => text,
+            Err(message) => {
+                self.status = TranslationStatus::Error {
+                    original_text: text.to_string(),
+                    message,
+                };
+                self.request_repaint();
+                return;
+            }
+        };
 
         self.status = TranslationStatus::Loading {
             original_text: trimmed.to_string(),
@@ -145,6 +157,62 @@ impl SharedPopupState {
                 provider: self.active_provider.clone(),
             });
         }
+    }
+
+    /// Reverse the actual translation direction, including automatic detection.
+    /// A current successful translation becomes the input for the reverse query.
+    pub fn swap_languages(&mut self) {
+        let result = match &self.status {
+            TranslationStatus::Success(result)
+                if result.original_text.trim() == self.edit_text.trim() =>
+            {
+                Some(result.clone())
+            }
+            _ => None,
+        };
+        let source = if self.source_lang != "auto" {
+            self.source_lang.clone()
+        } else {
+            result
+                .as_ref()
+                .and_then(|r| r.detected_lang.as_deref())
+                .filter(|language| !language.is_empty() && *language != "auto")
+                .map(normalize_language)
+                .unwrap_or_else(|| infer_source_language(&self.edit_text, &self.target_lang))
+        };
+        let target = result
+            .as_ref()
+            .map(|r| r.target_lang.clone())
+            .unwrap_or_else(|| {
+                if self.source_lang == "auto" && self.target_lang == "zh-CN" && source == "zh-CN" {
+                    "en".into()
+                } else {
+                    self.target_lang.clone()
+                }
+            });
+        self.source_lang = target;
+        self.target_lang = source;
+        if let Some(result) = result {
+            if !result.translated_text.trim().is_empty() {
+                self.edit_text = result.translated_text;
+            }
+        }
+        self.request_repaint();
+    }
+
+    pub fn toggle_pin(&mut self) {
+        self.is_pinned = !self.is_pinned;
+        // Discard any earlier automatic follow request. Manual movement remains available.
+        self.should_update_pos = false;
+        println!(
+            "[Yanxi GUI] {}",
+            if self.is_pinned {
+                "窗口已固定"
+            } else {
+                "窗口已取消固定"
+            }
+        );
+        self.request_repaint();
     }
 
     pub fn play_tts(&self, text: &str, accent: Accent) {
@@ -162,6 +230,7 @@ impl SharedPopupState {
 
     pub fn update_hotkey(&mut self, new_hotkey: &str) {
         let trimmed = new_hotkey.trim().to_lowercase();
+        self.hotkey_feedback = None;
         self.settings_hotkey = trimmed.clone();
         if let Some(ref tx) = self.tx_hotkey {
             let _ = tx.send(trimmed);
@@ -210,5 +279,146 @@ impl SharedPopupState {
         }
 
         (x, y)
+    }
+}
+
+fn normalize_language(language: &str) -> String {
+    match language.to_ascii_lowercase().as_str() {
+        "zh" | "zh-cn" | "zh-hans" => "zh-CN".into(),
+        "zh-tw" | "zh-hant" => "zh-TW".into(),
+        "en-us" | "en-gb" => "en".into(),
+        _ => language.to_owned(),
+    }
+}
+
+fn infer_source_language(text: &str, target: &str) -> String {
+    // Cached results from upstream do not include detected_lang. Cover the
+    // scripts we can identify directly; Latin text defaults to English.
+    let language = if text.chars().any(|c| ('\u{3040}'..='\u{30ff}').contains(&c)) {
+        "ja"
+    } else if text.chars().any(|c| ('\u{ac00}'..='\u{d7af}').contains(&c)) {
+        "ko"
+    } else if text.chars().any(|c| ('\u{0400}'..='\u{04ff}').contains(&c)) {
+        "ru"
+    } else if text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+        || (text.trim().is_empty() && target == "en")
+    {
+        "zh-CN"
+    } else {
+        "en"
+    };
+    language.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn translated_state(
+        source: &str,
+        target: &str,
+        input: &str,
+        output: &str,
+        detected: Option<&str>,
+    ) -> SharedPopupState {
+        let mut state = SharedPopupState::new(&AppConfig::default());
+        state.source_lang = source.into();
+        state.target_lang = target.into();
+        state.edit_text = input.into();
+        state.status = TranslationStatus::Success(TranslationResult {
+            original_text: input.into(),
+            translated_text: output.into(),
+            source_lang: source.into(),
+            target_lang: target.into(),
+            provider: "microsoft".into(),
+            latency_ms: 0.0,
+            from_cache: detected.is_none(),
+            phonetic: None,
+            detected_lang: detected.map(str::to_owned),
+        });
+        state
+    }
+
+    #[test]
+    fn swap_auto_translation_reverses_text_and_request_direction() {
+        let mut state = translated_state("auto", "zh-CN", "Hello world", "你好，世界", Some("en"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state.tx_command = Some(tx);
+        state.swap_languages();
+        let text = state.edit_text.clone();
+        state.trigger_translate(&text);
+        assert!(matches!(rx.try_recv().unwrap(), GuiCommand::Translate {
+            text, source_lang, target_lang, ..
+        } if text == "你好，世界" && source_lang == "zh-CN" && target_lang == "en"));
+    }
+
+    #[test]
+    fn swap_cached_chinese_translation_uses_actual_result_target() {
+        let mut state = translated_state("auto", "en", "你好，世界", "Hello, world", None);
+        state.target_lang = "zh-CN".into(); // UI auto-direction, actual API result is English.
+        state.swap_languages();
+        assert_eq!(
+            (&*state.source_lang, &*state.target_lang, &*state.edit_text),
+            ("en", "zh-CN", "Hello, world")
+        );
+    }
+
+    #[test]
+    fn swap_without_a_result_is_enabled_and_keeps_input() {
+        let mut state = SharedPopupState::new(&AppConfig::default());
+        state.swap_languages();
+        assert_eq!((&*state.source_lang, &*state.target_lang), ("zh-CN", "en"));
+        assert!(state.edit_text.is_empty());
+        state.edit_text = "你好".into();
+        state.swap_languages();
+        assert_eq!(
+            (&*state.source_lang, &*state.target_lang, &*state.edit_text),
+            ("en", "zh-CN", "你好")
+        );
+    }
+
+    #[test]
+    fn pin_discards_pending_follow_and_preserves_geometry_through_toggle() {
+        let mut state = SharedPopupState::new(&AppConfig::default());
+        state.window_pos = Some((120.0, 260.0));
+        state.window_size = (760.0, 560.0);
+        state.should_update_pos = true;
+        state.toggle_pin();
+        assert!(state.is_pinned);
+        assert!(!state.should_update_pos);
+        assert_eq!(state.window_pos, Some((120.0, 260.0)));
+        state.toggle_pin();
+        assert!(!state.is_pinned);
+        assert_eq!(state.window_size, (760.0, 560.0));
+    }
+
+    #[test]
+    fn startup_visibility_follows_preference() {
+        let mut config = AppConfig::default();
+        assert!(SharedPopupState::new(&config).is_visible);
+        config.ui.start_hidden = true;
+        assert!(!SharedPopupState::new(&config).is_visible);
+    }
+
+    #[test]
+    fn oversized_input_reports_error_without_dispatching_translation() {
+        let mut state = SharedPopupState::new(&AppConfig::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state.tx_command = Some(tx);
+        state.trigger_translate(&"字".repeat(3001));
+        assert!(matches!(state.status, TranslationStatus::Error { .. }));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn new_hotkey_clears_registration_feedback() {
+        let mut state = SharedPopupState::new(&AppConfig::default());
+        assert!(state.hotkey_feedback.is_none());
+        state.hotkey_feedback = Some((true, "old registration".into()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.tx_hotkey = Some(tx);
+        state.update_hotkey(" CTRL+ALT+T ");
+        assert!(state.hotkey_feedback.is_none());
+        assert_eq!(rx.recv().unwrap(), "ctrl+alt+t");
     }
 }

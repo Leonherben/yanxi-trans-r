@@ -1,1 +1,5 @@
 /target
+
+# 本地验证与构建工作目录（不纳入版本库）
+/verification-0.5.5/
+/revision-0.5.5/

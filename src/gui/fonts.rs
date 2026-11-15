@@ -1,98 +1,106 @@
-use eframe::egui::{Context, FontData, FontDefinitions, FontFamily};
+use eframe::egui::{Context, FontData, FontDefinitions, FontFamily, FontId};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn configure_cjk_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
-
-    if let Some((name, font_bytes)) = load_best_cjk_font() {
-        println!("[Yanxi GUI] 🔤 成功加载中文字体: {}", name);
-        fonts.font_data.insert(
-            name.clone(),
-            Arc::new(FontData::from_owned(font_bytes)),
-        );
-
-        // 将中文字体插入到比例字体 (Proportional) 的最前端
-        if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
-            prop.insert(0, name.clone());
-        }
-
-        // 将中文字体插入到等宽字体 (Monospace) 的后备列表
-        if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
-            mono.push(name);
-        }
-
+    if let Some((name, data)) = load_best_cjk_font() {
+        println!("[Yanxi GUI] 成功加载中文字体: {name}");
+        fonts.font_data.insert(name.clone(), data);
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, name.clone());
+        fonts
+            .families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .push(name);
         ctx.set_fonts(fonts);
     } else {
-        eprintln!("[Yanxi GUI] ⚠️ 未找到系统中文字体，可能会显示乱码方框");
+        eprintln!("[Yanxi GUI] 未找到包含中文字符的字体，请安装系统中文字体后重试");
     }
 }
 
-fn load_best_cjk_font() -> Option<(String, Vec<u8>)> {
-    // 1. 尝试通过 fc-match (Linux fontconfig) 查找系统推荐中文字体
+// Check the candidate itself, without egui's bundled fallback fonts. A fontconfig
+// match can be a Latin font when the desktop language is English.
+fn supports_chinese(data: Arc<FontData>) -> bool {
+    let mut definitions = FontDefinitions::empty();
+    definitions.font_data.insert("candidate".into(), data);
+    definitions
+        .families
+        .insert(FontFamily::Proportional, vec!["candidate".into()]);
+    let mut fonts = eframe::egui::epaint::text::Fonts::new(Default::default(), definitions);
+    fonts.has_glyphs(&FontId::proportional(14.0), "中文翻译设置")
+}
+
+fn load_best_cjk_font() -> Option<(String, Arc<FontData>)> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
     #[cfg(target_os = "linux")]
+    if let Ok(output) = std::process::Command::new("fc-match")
+        .args(["-s", "-f", "%{file}\n", ":lang=zh-cn"])
+        .output()
     {
-        if let Ok(output) = std::process::Command::new("fc-match")
-            .args(["-f", "%{file}", ":lang=zh"])
-            .output()
-        {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path_str.is_empty() {
-                    let path = Path::new(&path_str);
-                    if path.exists() {
-                        if let Ok(bytes) = std::fs::read(path) {
-                            let font_name = path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("cjk-system-font")
-                                .to_string();
-                            return Some((font_name, bytes));
-                        }
-                    }
-                }
-            }
+        if output.status.success() {
+            candidates.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(PathBuf::from),
+            );
         }
     }
-
-    // 2. 候选字体文件路径列表
-    let mut candidate_paths: Vec<PathBuf> = Vec::new();
-
-    // Linux 常见路径
     if let Some(home) = dirs::home_dir() {
-        candidate_paths.push(home.join(".local/share/fonts/HarmonyOS_Sans/HarmonyOS_Sans_SC_Regular.ttf"));
-        candidate_paths.push(home.join(".local/share/fonts/PingFangSC/PingFangSC-Regular.ttf"));
-        candidate_paths.push(home.join(".fonts/HarmonyOS_Sans_SC_Regular.ttf"));
+        candidates
+            .push(home.join(".local/share/fonts/HarmonyOS_Sans/HarmonyOS_Sans_SC_Regular.ttf"));
+        candidates.push(home.join(".local/share/fonts/PingFangSC/PingFangSC-Regular.ttf"));
+        candidates.push(home.join(".fonts/HarmonyOS_Sans_SC_Regular.ttf"));
     }
-    candidate_paths.push(PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"));
-    candidate_paths.push(PathBuf::from("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"));
-    candidate_paths.push(PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"));
-    candidate_paths.push(PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"));
-    candidate_paths.push(PathBuf::from("/usr/share/fonts/truetype/arphic/uming.ttc"));
-    candidate_paths.push(PathBuf::from("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"));
+    candidates.extend(
+        [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "C:\\Windows\\Fonts\\msyh.ttc",
+            "C:\\Windows\\Fonts\\msyh.ttf",
+            "C:\\Windows\\Fonts\\simsun.ttc",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+        ]
+        .into_iter()
+        .map(PathBuf::from),
+    );
 
-    // Windows 常见路径
-    candidate_paths.push(PathBuf::from("C:\\Windows\\Fonts\\msyh.ttc"));
-    candidate_paths.push(PathBuf::from("C:\\Windows\\Fonts\\msyh.ttf"));
-    candidate_paths.push(PathBuf::from("C:\\Windows\\Fonts\\simsun.ttc"));
-    candidate_paths.push(PathBuf::from("C:\\Windows\\Fonts\\simhei.ttf"));
-
-    // macOS 常见路径
-    candidate_paths.push(PathBuf::from("/System/Library/Fonts/PingFang.ttc"));
-    candidate_paths.push(PathBuf::from("/Library/Fonts/Arial Unicode.ttf"));
-
-    for path in candidate_paths {
-        if path.exists() {
-            if let Ok(bytes) = std::fs::read(&path) {
-                let font_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("cjk-fallback-font")
-                    .to_string();
-                return Some((font_name, bytes));
+    let mut checked = std::collections::HashSet::new();
+    for path in candidates {
+        if !checked.insert(path.clone()) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&path) {
+            let data = Arc::new(FontData::from_owned(bytes));
+            if supports_chinese(Arc::clone(&data)) {
+                let name = Path::new(&path).file_name()?.to_string_lossy().into_owned();
+                return Some((name, data));
             }
         }
     }
-
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_latin_only_font_instead_of_accepting_fontconfig_match() {
+        // egui's bundled fonts lack CJK glyphs, so matching a valid Latin font
+        // must not stop us from trying the system Chinese candidates.
+        let defaults = FontDefinitions::default();
+        let latin = defaults.font_data.values().next().unwrap();
+        assert!(!supports_chinese(Arc::clone(latin)));
+    }
 }

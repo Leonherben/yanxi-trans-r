@@ -141,11 +141,7 @@ impl OpenAICompatibleTranslator {
                     ))
                 } else {
                     let err_text = response.text().await.unwrap_or_default();
-                    let snippet = if err_text.len() > 200 {
-                        format!("{}...", &err_text[..200])
-                    } else {
-                        err_text
-                    };
+                    let snippet = truncate_error_body(&err_text);
                     Ok(TranslationResult::error(
                         &req.text,
                         format!("API 请求失败 HTTP {}: {snippet}", status.as_u16()),
@@ -181,5 +177,32 @@ impl OpenAICompatibleTranslator {
             Ok(res) => (false, res.translated_text),
             Err(e) => (false, format!("连接错误: {e}")),
         }
+    }
+}
+
+/// 截断错误响应体用于展示，按字符边界切割以避免多字节 UTF-8 造成 panic
+fn truncate_error_body(err_text: &str) -> String {
+    if err_text.chars().count() > 200 {
+        format!("{}...", err_text.chars().take(200).collect::<String>())
+    } else {
+        err_text.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_error_body;
+
+    #[test]
+    fn test_truncate_short_body_unchanged() {
+        assert_eq!(truncate_error_body("invalid api key"), "invalid api key");
+    }
+
+    #[test]
+    fn test_truncate_multibyte_body() {
+        let body = "错".repeat(250);
+        let out = truncate_error_body(&body);
+        assert_eq!(out.chars().count(), 203);
+        assert!(out.ends_with("..."));
     }
 }

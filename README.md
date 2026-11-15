@@ -1,11 +1,24 @@
 # 言蹊翻译 (Yanxi-Trans-R)
 
+> 版本 **0.5.7**，基于上游 0.5.5 的分支修订版（上游 `main` 仍为 0.5.5）。相对于 0.5.5 修复了界面排版、语言交换、窗口固定、窗口绑定、中文字体、划词去重与发音播放，并在设置页集中管理翻译服务。
+>
+> - 主界面只保留语言、原文、译文和常用操作；翻译服务和密钥只在设置页管理。
+> - 首次启动显示窗口，可在设置页保存“启动时隐藏浮窗”偏好。
+> - 选中文字后按 Alt+Q 主动翻译；同一文本已经显示时再次按下收起，隐藏时再次按下重新打开。仅读取 X11 当前选区，不读取旧剪贴板内容。
+> - 默认原文区占约 1/3；长内容在区域内滚动，可折叠原文和拖动分隔条。
+> - 按实际汉字覆盖能力选择中文字体；无需设置 FC_LANG。
+> - 统一按 Unicode 字符计数，最多 3000 字符；短时间抑制重复选词，之后允许重查同一个词。
+> - 设置页显示快捷键实际注册状态，非法组合或已占用时给出反馈。
+> - 保留原版取消旧翻译请求、多行管道输入、缓存、损坏配置备份和中文错误文本处理。
+>
+> 本次验证使用 Rust 1.99.0 / Linux X11。推荐在外层目录运行 `./start-gui.sh`，它使用独立配置和 bwrap 沙箱。默认必应通道需要联网；原生 Wayland 划词、付费服务、发音播放没有包含在本轮完整验证范围内。
+
 <div align="center">
 
 [![CI](https://github.com/Leonherben/yanxi-trans-r/actions/workflows/ci.yml/badge.svg)](https://github.com/Leonherben/yanxi-trans-r/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-brightgreen.svg)]()
-[![Rust Version](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-Linux-brightgreen.svg)]()
+[![Rust Version](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)]()
 
 **言蹊翻译 (Yanxi-Trans-R)** 是一款使用纯 Rust 打造的超轻量、极速跨平台划词翻译引擎与终端生产力工具。  
 由原有 Python/PySide6 版本（[yanxi-trans](https://github.com/Leonherben/yanxi-trans.git)）重构演进而来，追求极致的启动响应、超低内存开销以及开箱即用的免配置体验。
@@ -17,7 +30,7 @@
 ## 🌟 核心特性
 
 - ⚡ **极致轻量 & 零依赖**：单文件原生纯 Rust 可执行程序，无需 Python 环境及沉重的 Qt/PySide6 依赖库，相较于原版内存下降 **80%+**。
-- 🪟 **原生桌面极简悬浮弹窗 (`yanxi-gui`)**：基于 `eframe`/`egui` 打造的高性能毛玻璃深色悬浮窗，无焦点窃取打扰，智能跟随光标定位并具备屏幕边缘防溢出。
+- 🪟 **原生桌面极简悬浮弹窗 (`yanxi-gui`)**：基于 `eframe`/`egui` 打造的极简浅色悬浮窗，无焦点窃取打扰，智能跟随光标定位并具备屏幕边缘防溢出。
 - 🎯 **X11 XFixes 全局无感划词监听**：彻底摒弃传统 24 小时低级鼠标钩子轮询，日常 **完全零 CPU 占用**，在任意应用中选词高亮即时触发。
 - 🌐 **微软官方免 Key 极速通道**：内置高拟真 Bing/Edge 网页端自适应动态会话签名机制，无需申请任何 API Key 即可无限免费体验极速翻译（支持注音/拼音与语种自动识别）。
 - 🤖 **兼容大模型生态**：原生支持 OpenAI、DeepSeek、Moonshot 等任何兼容 `/chat/completions` 协议的大模型，支持自定义 System Prompt。
@@ -29,21 +42,40 @@
 
 ## 🚀 快速上手
 
-### 1. 源码编译与安装
+### 1. 环境依赖
 
-确保系统已安装 Rust 工具链（1.75+）：
+运行时（Linux X11）：
+
+- `xsel`：部分应用不按 ICCCM 返回选区时的回退取词（可选）
+- GStreamer（`gst-launch-1.0`）、PipeWire（`pw-play`）、PulseAudio（`paplay`）、`mpv` 任一即可用于发音
+- 中文字体：Noto Sans CJK、文泉驿或系统自带 CJK 字体
+
+构建依赖（Debian/Ubuntu）：
+
+```bash
+sudo apt install build-essential pkg-config libx11-dev libxkbcommon-dev \
+  libgl1-mesa-dev xsel gstreamer1.0-tools fonts-noto-cjk
+```
+
+Fedora：
+
+```bash
+sudo dnf install gcc make pkg-config libX11-devel libxkbcommon-devel \
+  mesa-libGL-devel xsel gstreamer1-plugins-base google-noto-sans-cjk-fonts
+```
+
+### 2. 构建与安装
 
 ```bash
 git clone https://github.com/Leonherben/yanxi-trans-r.git
 cd yanxi-trans-r
-cargo build --release
-
-# 安装 CLI 与 GUI 工具至用户本地 bin
-install -Dm755 target/release/yanxi-cli ~/.local/bin/yanxi-cli
-install -Dm755 target/release/yanxi-gui ~/.local/bin/yanxi-gui
+bash build.sh      # 检查依赖并 cargo build --release
+bash install.sh    # 安装到 ~/.local/bin 并注册桌面入口
 ```
 
-### 2. 基本使用
+安装后运行 `yanxi-gui`，按 `Alt + Q` 呼出/收起悬浮窗。首次使用默认走微软免 Key 通道；如需切换大模型，打开设置填写 API Key。
+
+### 3. 基本使用
 
 #### 直接翻译
 ```bash
@@ -170,16 +202,16 @@ yanxi-cli --clear-cache
   - [x] 基于 `eframe`/`egui` 打造的高性能无焦点窃取悬浮窗 (`yanxi-gui`)
   - [x] 光标跟随动态定位与屏幕边缘防溢出翻转
   - [x] 多平台中文字体自适应探测与渲染（优先加载系统 HarmonyOS Sans / Noto Sans CJK / 微软雅黑 / 苹方，完美杜绝豆腐方块乱码）
-  - [x] 暗黑毛玻璃卡片拟态、拼音注音、一键复制与图钉固定 (📌)
+  - [x] 极简浅色界面、拼音注音、一键复制与图钉固定
   - [x] 内存常驻大幅降低至 ~20MB，运行响应如丝顺滑
-- [x] **Phase 4: 全功能深度对齐 (v0.4.0 当前最新版本)**
+- [x] **Phase 4: 全功能深度对齐 (v0.5.5 当前最新版本)**
   - [x] **可交互查词输入框**：原文区域支持手动打字、粘贴、修改，按回车（`Enter`）或点击“翻译”即时查词，带一键“清空”与字符计数
-  - [x] **顶部引擎就地切换**：点击下拉胶囊秒切微软 / DeepSeek / OpenAI / 智谱 GLM / 本地 Ollama 并就地重译
-  - [x] **多语言就地切换**：常用语种下拉切换（中/英/日/韩/法/德/西/俄），支持 `⇄` 一键对调互换
-  - [x] **三大取词模式系统**：支持“伴随阅读”（默认，关闭时静默防打扰）、“划选即弹窗”与“手动查词”
-  - [x] **图形可视化设置中心 (`⚙`)**：浮窗内嵌服务商配置面板，支持 API Key 防窥查看、参数修改与“⚡ 测试连通性”
+  - [x] **引擎统一在设置中切换**：⚙ 设置面板选择微软 / DeepSeek / OpenAI / 智谱 GLM / 本地 Ollama，切换后自动重译
+  - [x] **双语言就地切换**：顶部源语言（含自动检测）与目标语言双下拉（中/英/日/韩/法/德/西/俄），支持 `⇄` 一键对调互换
+  - [x] **三大取词模式系统**：支持“伴随阅读”（默认，关闭时静默防打扰）、“划选即弹窗”与“手动查词”，均在设置面板内切换
+  - [x] **图形可视化设置中心 (`⚙`)**：浮窗内嵌服务商配置面板，支持引擎切换、API Key 防窥查看、参数修改与“⚡ 测试连通性”
   - [x] **单实例运行保护 (IPC Lock)**：基于本地 Unix Socket 互斥锁，重复运行自动唤起并置顶现有悬浮窗，杜绝多实例冲突
-  - [x] **全局原生热键**：`Alt + D` / `Alt + Q` 全局快速展开/收起悬浮窗，`Esc` 随时快速收起
+  - [x] **全局原生热键**：`Alt + Q` 全局呼出/收起悬浮窗（可在设置中自定义），`Esc` 随时快速收起
   - [x] **大模型生态预设**：新增智谱 GLM (`glm-4-flash`) 与 本地 Ollama (`qwen2.5:1.5b`) 默认预设
 
 ---

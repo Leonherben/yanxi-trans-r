@@ -34,127 +34,146 @@ pub async fn play_pronunciation(text: &str, accent: Accent) {
         return;
     }
 
-    let encoded = url_encode(&clean);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(6))
-        .build()
-        .unwrap_or_default();
-
-    // 优先尝试有道真人词典发音；若为多词短语/句子或接口异常，自动切换 Google TTS 高质量发音
-    let is_single_word = !clean.contains(' ');
-    let mut audio_bytes = None;
-
-    if is_single_word {
-        let accent_code = match accent {
-            Accent::Uk => "1",
-            Accent::Us => "2",
-        };
-        let youdao_url = format!("https://dict.youdao.com/dictvoice?audio={encoded}&type={accent_code}");
-        if let Ok(resp) = client
-            .get(&youdao_url)
-            .header(
-                reqwest::header::USER_AGENT,
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            .send()
-            .await
-        {
-            if resp.status().is_success() {
-                if let Ok(b) = resp.bytes().await {
-                    if b.len() > 500 {
-                        audio_bytes = Some(b);
-                    }
-                }
-            }
-        }
-    }
-
-    if audio_bytes.is_none() {
-        let tl = match accent {
-            Accent::Uk => "en-GB",
-            Accent::Us => "en-US",
-        };
-        let google_url = format!("https://translate.google.com/translate_tts?ie=UTF-8&tl={tl}&client=tw-ob&q={encoded}");
-        if let Ok(resp) = client
-            .get(&google_url)
-            .header(
-                reqwest::header::USER_AGENT,
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            .send()
-            .await
-        {
-            if resp.status().is_success() {
-                if let Ok(b) = resp.bytes().await {
-                    if b.len() > 300 {
-                        audio_bytes = Some(b);
-                    }
-                }
-            }
-        }
-    }
-
-    let bytes = match audio_bytes {
-        Some(b) => b,
+    let bytes = match fetch_audio(&clean, accent).await {
+        Some(bytes) => bytes,
         None => {
-            eprintln!("[Yanxi TTS] 无法从发音服务获取音频数据 (已尝试有道词典与 Google TTS)");
+            eprintln!("[Yanxi TTS] 无法从发音服务获取音频数据 (已尝试有道、百度与 Google TTS)");
             return;
         }
     };
 
-    // 在阻塞线程池中解码播放：优先流式管道，降级 POSIX 共享内存 RAM 播放，全程零物理磁盘缓存
+    play_bytes(bytes);
+}
+
+/// Try the configured voice sources in order. A transient reset must not make
+/// pronunciation fail outright, so every source gets a bounded retry.
+async fn fetch_audio(clean: &str, accent: Accent) -> Option<Vec<u8>> {
+    let encoded = url_encode(clean);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    let is_single_word = !clean.contains(' ');
+    let accent_code = match accent {
+        Accent::Uk => "1",
+        Accent::Us => "2",
+    };
+    let tl = match accent {
+        Accent::Uk => "en-GB",
+        Accent::Us => "en-US",
+    };
+    let mut sources = Vec::new();
+    if is_single_word {
+        sources.push(format!(
+            "https://dict.youdao.com/dictvoice?audio={encoded}&type={accent_code}"
+        ));
+    }
+    sources.push(format!(
+        "https://fanyi.baidu.com/gettts?lan=en&text={encoded}&spd=3&source=web&voice={}",
+        if accent == Accent::Uk { "2" } else { "1" }
+    ));
+    if is_single_word {
+        sources.push(format!(
+            "https://dict.youdao.com/dictvoice?audio={encoded}&type={accent_code}"
+        ));
+    }
+    sources.push(format!(
+        "https://translate.google.com/translate_tts?ie=UTF-8&tl={tl}&client=tw-ob&q={encoded}"
+    ));
+
+    for url in sources {
+        for attempt in 0..2 {
+            match client
+                .get(&url)
+                .header(reqwest::header::USER_AGENT, user_agent)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(bytes) = resp.bytes().await {
+                        if !bytes.is_empty() {
+                            return Some(bytes.to_vec());
+                        }
+                    }
+                }
+                Ok(resp) if attempt == 0 && resp.status().is_server_error() => {}
+                _ if attempt == 0 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                _ => break,
+            }
+        }
+    }
+    None
+}
+
+/// Decode and play in RAM. Each player is tried by its real exit status, so a
+/// player that starts but cannot open the audio device falls through to the next.
+fn play_bytes(bytes: Vec<u8>) {
     tokio::task::spawn_blocking(move || {
-        // 1. 优先尝试 GStreamer 纯管道流式解码播放 (零文件，最优雅)
-        let gst_child = Command::new("gst-launch-1.0")
-            .args(["-q", "fdsrc", "!", "decodebin", "!", "audioconvert", "!", "audioresample", "!", "autoaudiosink"])
+        // 1. GStreamer streaming from stdin: no file at all.
+        if let Ok(mut child) = Command::new("gst-launch-1.0")
+            .args([
+                "-q",
+                "fdsrc",
+                "!",
+                "decodebin",
+                "!",
+                "audioconvert",
+                "!",
+                "audioresample",
+                "!",
+                "autoaudiosink",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
-
-        if let Ok(mut proc) = gst_child {
-            if let Some(mut stdin) = proc.stdin.take() {
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(&bytes);
-                drop(stdin);
             }
-            if let Ok(status) = proc.wait() {
-                if status.success() {
-                    return;
-                }
-            }
-        }
-
-        // 2. 降级尝试 POSIX 共享内存 /dev/shm (纯内核 RAM 虚拟盘，零物理磁盘 I/O 与磨损)
-        let pid = std::process::id();
-        let shm_path = format!("/dev/shm/yanxi_tts_{}.mp3", pid);
-        if std::fs::write(&shm_path, &bytes).is_ok() {
-            let res = Command::new("pw-play")
-                .arg(&shm_path)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .or_else(|_| {
-                    Command::new("paplay")
-                        .arg(&shm_path)
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status()
-                })
-                .or_else(|_| {
-                    Command::new("mpv")
-                        .args([&shm_path, "--no-video", "--really-quiet"])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status()
-                });
-
-            let _ = std::fs::remove_file(&shm_path);
-            if res.is_ok() {
+            if child.wait().map(|status| status.success()).unwrap_or(false) {
                 return;
             }
         }
 
-        eprintln!("[Yanxi TTS] 未能通过系统音频服务播放 (已尝试 gst-launch-1.0 / pw-play / paplay / mpv)");
+        // 2. Shared memory file in /dev/shm, then real exit-status checks.
+        let pid = std::process::id();
+        let shm_path = format!("/dev/shm/yanxi_tts_{pid}.mp3");
+        if std::fs::write(&shm_path, &bytes).is_err() {
+            eprintln!("[Yanxi TTS] 无法写入临时音频");
+            return;
+        }
+        let candidates: [(&str, Vec<&str>); 3] = [
+            ("pw-play", vec![]),
+            ("paplay", vec![]),
+            ("mpv", vec!["--no-video", "--really-quiet"]),
+        ];
+        let mut played = false;
+        for (player, extra) in candidates {
+            let mut args: Vec<&str> = extra;
+            args.push(&shm_path);
+            let ok = Command::new(player)
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if ok {
+                played = true;
+                break;
+            }
+        }
+        let _ = std::fs::remove_file(&shm_path);
+        if !played {
+            eprintln!(
+                "[Yanxi TTS] 未能通过系统音频服务播放 (已尝试 gst-launch-1.0 / pw-play / paplay / mpv)"
+            );
+        }
     });
 }
 
@@ -171,9 +190,24 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires network access for the real voice services"]
+    fn fetches_real_audio_for_word() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let bytes = runtime.block_on(fetch_audio("Save", Accent::Us));
+        let bytes = bytes.expect("no voice source returned audio");
+        assert!(bytes.len() > 500, "audio too small: {}", bytes.len());
+    }
+
+    #[test]
+    #[ignore = "requires network and a real audio device"]
+    fn plays_real_audio_end_to_end() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(play_pronunciation("Save", Accent::Us));
+    }
+
+    #[test]
     fn test_url_encode() {
         assert_eq!(url_encode("hello world"), "hello%20world");
         assert_eq!(url_encode("test&query=1"), "test%26query%3D1");
     }
 }
-

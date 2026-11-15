@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=言蹊翻译
+Comment=划词翻译悬浮窗
+Exec=@BIN@
+Icon=accessories-dictionary
+Terminal=false
+Categories=Utility;Education;
+StartupNotify=false
