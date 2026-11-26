@@ -93,7 +93,7 @@ mod platform {
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
         PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
     };
-    use windows::core::HSTRING;
+    use windows::core::{HSTRING, HRESULT};
 
     struct PipeHandle(HANDLE);
 
@@ -147,19 +147,23 @@ mod platform {
 
         let handle = match open() {
             Ok(h) => h,
-            Err(err) if err.code() == ERROR_PIPE_BUSY.to_hresult() => {
+            Err(err) if err.code() == HRESULT::from_win32(ERROR_PIPE_BUSY.0) => {
                 unsafe {
                     let _ = WaitNamedPipeW(pipe_wide, 500);
                 }
                 match open() {
                     Ok(h) => h,
-                    Err(retry_err) if retry_err.code() == ERROR_FILE_NOT_FOUND.to_hresult() => {
+                    Err(retry_err)
+                        if retry_err.code() == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0) =>
+                    {
                         return Ok(false);
                     }
                     Err(retry_err) => return Err(retry_err),
                 }
             }
-            Err(err) if err.code() == ERROR_FILE_NOT_FOUND.to_hresult() => return Ok(false),
+            Err(err) if err.code() == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0) => {
+                return Ok(false);
+            }
             Err(err) => return Err(err),
         };
 
@@ -220,7 +224,9 @@ mod platform {
                             let connected = unsafe { ConnectNamedPipe(handle.0, None) };
                             match connected {
                                 Ok(()) => {}
-                                Err(err) if err.code() == ERROR_PIPE_CONNECTED.to_hresult() => {}
+                                Err(err)
+                                    if err.code()
+                                        == HRESULT::from_win32(ERROR_PIPE_CONNECTED.0) => {}
                                 Err(_) => break,
                             }
 
