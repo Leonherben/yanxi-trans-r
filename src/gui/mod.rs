@@ -200,8 +200,151 @@ fn hwnd_from_isize(hwnd: isize) -> windows::Win32::Foundation::HWND {
 }
 
 #[cfg(windows)]
+fn enable_dpi_awareness_win32() {
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+#[cfg(windows)]
+pub fn dpi_scale_for_point_win32(px: i32, py: i32) -> f32 {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    let monitor = unsafe { MonitorFromPoint(POINT { x: px, y: py }, MONITOR_DEFAULTTONEAREST) };
+    let mut dpi_x = 96u32;
+    let mut dpi_y = 96u32;
+    if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.is_ok()
+        && dpi_x > 0
+    {
+        (dpi_x as f32 / 96.0).max(1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Strip DWM caption/frame styles that winit can re-apply on visibility or level updates.
+#[cfg(windows)]
+pub fn ensure_borderless_popup_style_win32(hwnd: isize) {
+    use windows::Win32::Graphics::Dwm::{
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_BORDER, WS_CAPTION,
+        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE,
+        WS_EX_DLGMODALFRAME, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+        WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    };
+    let handle = hwnd_from_isize(hwnd);
+    unsafe {
+        let cur_style = GetWindowLongW(handle, GWL_STYLE) as u32;
+        let strip_style = (WS_CAPTION
+            | WS_THICKFRAME
+            | WS_MINIMIZEBOX
+            | WS_MAXIMIZEBOX
+            | WS_SYSMENU
+            | WS_BORDER
+            | WS_DLGFRAME)
+            .0;
+        let add_style = (WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS).0;
+        let target_style = (cur_style & !strip_style) | add_style;
+
+        let cur_ex = GetWindowLongW(handle, GWL_EXSTYLE) as u32;
+        let strip_ex =
+            (WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE).0;
+        let target_ex = (cur_ex & !strip_ex) | WS_EX_TOOLWINDOW.0;
+
+        let mut changed = false;
+        if cur_style != target_style {
+            SetWindowLongW(handle, GWL_STYLE, target_style as i32);
+            changed = true;
+        }
+        if cur_ex != target_ex {
+            SetWindowLongW(handle, GWL_EXSTYLE, target_ex as i32);
+            changed = true;
+        }
+        if changed {
+            let corner = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                handle,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner as *const _ as *const core::ffi::c_void,
+                std::mem::size_of_val(&corner) as u32,
+            );
+            let _ = SetWindowPos(
+                handle,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn show_and_raise_win32(hwnd: isize, always_on_top: bool, activate: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindowVisible, SW_RESTORE, SW_SHOW,
+        SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SetForegroundWindow, SetWindowPos, ShowWindow,
+    };
+    let handle = hwnd_from_isize(hwnd);
+    ensure_borderless_popup_style_win32(hwnd);
+    unsafe {
+        if IsIconic(handle).as_bool() {
+            let _ = ShowWindow(handle, SW_RESTORE);
+        }
+        if !IsWindowVisible(handle).as_bool() {
+            let _ = ShowWindow(handle, if activate { SW_SHOW } else { SW_SHOWNOACTIVATE });
+        }
+        if always_on_top {
+            let _ = SetWindowPos(
+                handle,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        } else {
+            // Brief TOPMOST->NOTOPMOST promotes an unactivated popup above the foreground app.
+            let _ = SetWindowPos(
+                handle,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = SetWindowPos(
+                handle,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        if activate {
+            let _ = SetForegroundWindow(handle);
+        }
+    }
+}
+
+#[cfg(windows)]
 pub fn move_resize_win32(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
     use windows::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+    ensure_borderless_popup_style_win32(hwnd);
     unsafe {
         let _ = SetWindowPos(
             hwnd_from_isize(hwnd),
@@ -220,6 +363,7 @@ pub fn set_always_on_top_win32(hwnd: isize, always_on_top: bool) {
     use windows::Win32::UI::WindowsAndMessaging::{
         HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
     };
+    ensure_borderless_popup_style_win32(hwnd);
     let insert_after = if always_on_top {
         HWND_TOPMOST
     } else {
@@ -240,20 +384,7 @@ pub fn set_always_on_top_win32(hwnd: isize, always_on_top: bool) {
 
 #[cfg(windows)]
 pub fn raise_window_win32(hwnd: isize) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
-    };
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd_from_isize(hwnd),
-            Some(HWND_TOP),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-    }
+    show_and_raise_win32(hwnd, false, false);
 }
 
 pub fn set_always_on_top(x11_window: Option<u32>, win32_hwnd: Option<isize>, always_on_top: bool) {
@@ -371,7 +502,16 @@ pub fn default_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
     (w, h)
 }
 
+pub fn default_window_size_for_dpi(screen_w: f32, screen_h: f32, dpi_scale: f32) -> (f32, f32) {
+    let scale = dpi_scale.max(1.0);
+    let (lw, lh) = default_window_size(screen_w / scale, screen_h / scale);
+    ((lw * scale).round(), (lh * scale).round())
+}
+
 pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(windows)]
+    enable_dpi_awareness_win32();
+
     // 1. 单实例进程保护 (Single Instance Lock)
     let instance_check = match SingleInstance::check("yanxi") {
         Ok(check) => check,
@@ -414,6 +554,10 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Ok(mut lock) = state_ipc.lock() {
             lock.mark_shown(std::time::Instant::now());
             lock.should_update_pos = true;
+            #[cfg(windows)]
+            if let Some(hwnd) = lock.win32_hwnd {
+                show_and_raise_win32(hwnd, lock.is_pinned, true);
+            }
             if !lock.is_pinned {
                 raise_window(lock.x11_window, lock.win32_hwnd);
             }
@@ -497,8 +641,20 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }
                         }
                     }
+                    #[cfg(windows)]
+                    if let Some(hwnd) = lock.win32_hwnd {
+                        show_and_raise_win32(hwnd, lock.is_pinned, true);
+                    }
+                    #[cfg(not(windows))]
                     raise_window(lock.x11_window, lock.win32_hwnd);
                     lock.should_update_pos = true;
+                } else {
+                    #[cfg(windows)]
+                    if lock.is_visible {
+                        if let Some(hwnd) = lock.win32_hwnd {
+                            show_and_raise_win32(hwnd, lock.is_pinned, true);
+                        }
+                    }
                 }
                 lock.request_repaint();
             }
@@ -538,30 +694,40 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 7. 在主线程启动 eframe 原生无边框透明视口 (使用 OpenGL Glow 后端，配合 Utility/无任务栏窗口类型)
     #[cfg(target_os = "linux")]
-    let (init_origin, init_screen, (init_w, init_h)) = x11rb::connect(None)
+    let (init_origin, init_screen, (init_w, init_h), init_scale) = x11rb::connect(None)
         .ok()
         .map(|(conn, screen_num)| {
             let root = &conn.setup().roots[screen_num];
             let sw = root.width_in_pixels as f32;
             let sh = root.height_in_pixels as f32;
-            ((0.0, 0.0), (sw, sh), default_window_size(sw, sh))
+            ((0.0, 0.0), (sw, sh), default_window_size(sw, sh), 1.0f32)
         })
-        .unwrap_or(((0.0, 0.0), (1920.0, 1080.0), (500.0, 320.0)));
+        .unwrap_or(((0.0, 0.0), (1920.0, 1080.0), (500.0, 320.0), 1.0f32));
     #[cfg(windows)]
-    let (init_origin, init_screen, (init_w, init_h)) = {
+    let (init_origin, init_screen, (init_w, init_h), init_scale) = {
         let (px, py) = cursor_pos_win32().unwrap_or((0, 0));
+        let scale = dpi_scale_for_point_win32(px, py);
         let (ox, oy, sw, sh) = monitor_work_area_for_point(px, py);
-        ((ox, oy), (sw, sh), default_window_size(sw, sh))
+        (
+            (ox, oy),
+            (sw, sh),
+            default_window_size_for_dpi(sw, sh, scale),
+            scale,
+        )
     };
     #[cfg(not(any(target_os = "linux", windows)))]
-    let (init_origin, init_screen, (init_w, init_h)) =
-        ((0.0, 0.0), (1920.0, 1080.0), (500.0, 320.0));
+    let (init_origin, init_screen, (init_w, init_h), init_scale) =
+        ((0.0, 0.0), (1920.0, 1080.0), (500.0, 320.0), 1.0f32);
 
     let (start_pos, start_size) = if let Ok(mut lock) = state.lock() {
         lock.screen_origin = init_origin;
         lock.screen_size = init_screen;
         if config.ui.pinned {
-            let raw_size = config.ui.pinned_size.unwrap_or((init_w, init_h));
+            let raw_size = config
+                .ui
+                .pinned_size
+                .map(|(w, h)| (w.max(380.0 * init_scale), h.max(220.0 * init_scale)))
+                .unwrap_or((init_w, init_h));
             let raw_pos = config.ui.pinned_pos.unwrap_or((
                 init_origin.0 + ((init_screen.0 - raw_size.0) / 2.0).max(10.0),
                 init_origin.1 + ((init_screen.1 - raw_size.1) / 2.0).max(10.0),
@@ -589,14 +755,16 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([start_size.0, start_size.1])
+        .with_inner_size([start_size.0 / init_scale, start_size.1 / init_scale])
         .with_min_inner_size([380.0, 220.0])
         .with_decorations(false)
         .with_transparent(true)
         .with_window_level(initial_level)
         .with_active(false)
         .with_taskbar(false)
-        .with_resizable(true)
+        .with_minimize_button(false)
+        .with_maximize_button(false)
+        .with_resizable(cfg!(not(windows)))
         .with_app_id("yanxi")
         .with_window_type(eframe::egui::X11WindowType::Utility);
     if let Some(icon) = load_app_icon() {
@@ -605,6 +773,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
+        persist_window: false,
         viewport,
         ..Default::default()
     };
@@ -644,6 +813,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if let Ok(handle) = cc.window_handle() {
                     if let RawWindowHandle::Win32(win32) = handle.as_raw() {
                         let hwnd = win32.hwnd.get();
+                        ensure_borderless_popup_style_win32(hwnd);
                         let pos = start_pos.unwrap_or((
                             init_origin.0 + ((init_screen.0 - start_size.0) / 2.0).max(10.0),
                             init_origin.1 + ((init_screen.1 - start_size.1) / 2.0).max(10.0),
@@ -656,6 +826,9 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             start_size.0.round() as i32,
                             start_size.1.round() as i32,
                         );
+                        if !config.ui.start_hidden {
+                            show_and_raise_win32(hwnd, initial_pinned, false);
+                        }
                         if let Ok(mut lock) = state_app.lock() {
                             lock.win32_hwnd = Some(hwnd);
                             lock.window_pos = Some(pos);
@@ -1264,6 +1437,8 @@ mod tests {
         assert_eq!(default_window_size(2560.0, 1440.0), (760.0, 504.0));
         assert_eq!(default_window_size(3440.0, 1440.0), (760.0, 504.0));
         assert_eq!(default_window_size(800.0, 600.0), (420.0, 300.0));
+        assert_eq!(default_window_size_for_dpi(2560.0, 1600.0, 2.0), (840.0, 600.0));
+        assert_eq!(default_window_size_for_dpi(1920.0, 1080.0, 1.5), (630.0, 450.0));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, S_FALSE, S_OK, WPARAM};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::System::DataExchange::{GetClipboardSequenceNumber, IsClipboardFormatAvailable};
 use windows::Win32::System::Ole::{CF_BITMAP, CF_DIB, CF_HDROP, CF_UNICODETEXT};
@@ -99,7 +99,8 @@ fn is_console_window(hwnd: HWND) -> bool {
 }
 
 fn read_uia_selection() -> Option<String> {
-    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    // Use MTA for UIA calls on non-pumping worker threads so COM never stalls waiting on an STA loop.
+    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let _guard = if hr == S_OK || hr == S_FALSE {
         ComGuard(true)
     } else if hr == RPC_E_CHANGED_MODE {

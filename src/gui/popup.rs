@@ -75,9 +75,14 @@ impl PopupApp {
             self.last_visible = Some(lock.is_visible);
             if lock.is_visible {
                 lock.last_shown_at = Some(std::time::Instant::now());
+                #[cfg(windows)]
+                if let Some(hwnd) = lock.win32_hwnd {
+                    crate::gui::ensure_borderless_popup_style_win32(hwnd);
+                }
                 if !lock.is_pinned {
                     crate::gui::raise_window(lock.x11_window, lock.win32_hwnd);
                 }
+                ui.ctx().request_repaint();
                 // Re-arm geometry repair: a remap can resize/move the window again.
                 self.geometry_checks = 0;
                 self.placing = false;
@@ -115,6 +120,11 @@ impl PopupApp {
 
         if !lock.is_visible {
             return;
+        }
+
+        #[cfg(windows)]
+        if let Some(hwnd) = lock.win32_hwnd {
+            crate::gui::ensure_borderless_popup_style_win32(hwnd);
         }
 
         let focused = ui.input(|i| i.focused);

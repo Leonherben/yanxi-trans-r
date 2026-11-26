@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if matches!(
         std::env::args().nth(1).as_deref(),
