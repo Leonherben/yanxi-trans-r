@@ -52,21 +52,95 @@ impl eframe::App for PopupApp {
     }
 }
 
+#[derive(Default)]
+struct PostRenderOps {
+    close_viewport: bool,
+    win32_topmost: Option<(isize, bool)>,
+    win32_move: Option<(isize, (f32, f32), (f32, f32))>,
+    win32_show: Option<(isize, bool, bool)>,
+    win32_ensure_borderless: Option<isize>,
+}
+
+fn execute_post_render_ops(ctx: &egui::Context, ops: PostRenderOps) {
+    if ops.close_viewport {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        return;
+    }
+    #[cfg(windows)]
+    {
+        if let Some(hwnd) = ops.win32_ensure_borderless {
+            crate::gui::ensure_borderless_popup_style_win32(hwnd);
+        }
+        if let Some((hwnd, always_on_top)) = ops.win32_topmost {
+            crate::gui::set_always_on_top_win32(hwnd, always_on_top);
+        }
+        if let Some((hwnd, pos, size)) = ops.win32_move {
+            crate::gui::move_resize_win32(
+                hwnd,
+                pos.0.round() as i32,
+                pos.1.round() as i32,
+                size.0.round() as i32,
+                size.1.round() as i32,
+            );
+        }
+        if let Some((hwnd, always_on_top, activate)) = ops.win32_show {
+            crate::gui::show_and_raise_win32(hwnd, always_on_top, activate);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (ctx, ops);
+    }
+}
+
+fn queue_or_apply_geometry(
+    ctx: &egui::Context,
+    ops: &mut PostRenderOps,
+    state: &SharedPopupState,
+    pos: (f32, f32),
+    size: (f32, f32),
+) {
+    if let Some(hwnd) = state.win32_hwnd {
+        ops.win32_move = Some((hwnd, pos, size));
+    } else {
+        crate::gui::apply_window_geometry(ctx, state.x11_window, None, pos, size);
+    }
+}
+
 impl PopupApp {
     fn render(&mut self, ui: &mut egui::Ui) {
-        // 全局 Esc 快捷键：随时收起浮窗
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if let Ok(mut lock) = self.state.lock() {
+        let ops = {
+            // 全局 Esc 快捷键：随时收起浮窗
+            let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let state = Arc::clone(&self.state);
+            let mut lock = match state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            if escape_pressed {
                 lock.hide_explicit();
             }
+            self.render_with_state(ui, &mut lock)
+        };
+        execute_post_render_ops(ui.ctx(), ops);
+    }
+
+    fn render_with_state(
+        &mut self,
+        ui: &mut egui::Ui,
+        lock: &mut SharedPopupState,
+    ) -> PostRenderOps {
+        let mut ops = PostRenderOps::default();
+
+        if lock.pending_win32_quit {
+            lock.pending_win32_quit = false;
+            ops.close_viewport = true;
+            return ops;
         }
 
-        let mut lock = match self.state.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
+        sync_window_level(&mut self.last_pinned, ui.ctx(), lock, &mut ops);
 
-        sync_window_level(&mut self.last_pinned, ui.ctx(), &lock);
+        let pending_show = lock.pending_win32_show.take();
 
         // Window state is stored in physical pixels; one helper owns all conversions.
         if self.last_visible != Some(lock.is_visible) {
@@ -75,12 +149,13 @@ impl PopupApp {
             self.last_visible = Some(lock.is_visible);
             if lock.is_visible {
                 lock.last_shown_at = Some(std::time::Instant::now());
-                #[cfg(windows)]
                 if let Some(hwnd) = lock.win32_hwnd {
-                    crate::gui::ensure_borderless_popup_style_win32(hwnd);
-                }
-                if !lock.is_pinned {
-                    crate::gui::raise_window(lock.x11_window, lock.win32_hwnd);
+                    ops.win32_ensure_borderless = Some(hwnd);
+                    if !lock.is_pinned || pending_show.is_some() {
+                        ops.win32_show = Some((hwnd, lock.is_pinned, pending_show.unwrap_or(false)));
+                    }
+                } else if !lock.is_pinned {
+                    crate::gui::raise_window(lock.x11_window, None);
                 }
                 ui.ctx().request_repaint();
                 // Re-arm geometry repair: a remap can resize/move the window again.
@@ -95,18 +170,19 @@ impl PopupApp {
                     // Remap is asynchronous: re-assert a few times instead of once.
                     for _ in 0..8 {
                         std::thread::sleep(Duration::from_millis(60));
-                        if let Ok(lock) = state.lock() {
-                            if !lock.is_visible {
+                        let target = state.lock().ok().and_then(|lock| {
+                            lock.is_visible.then(|| {
+                                lock.window_pos.map(|pos| {
+                                    (lock.x11_window, lock.win32_hwnd, pos, lock.window_size)
+                                })
+                            })?
+                        });
+                        if let Some((x11_win, win32_hwnd, pos, size)) = target {
+                            crate::gui::apply_window_geometry(&ctx, x11_win, win32_hwnd, pos, size);
+                        } else {
+                            let still_visible = state.lock().map(|l| l.is_visible).unwrap_or(false);
+                            if !still_visible {
                                 return;
-                            }
-                            if let Some(pos) = lock.window_pos {
-                                crate::gui::apply_window_geometry(
-                                    &ctx,
-                                    lock.x11_window,
-                                    lock.win32_hwnd,
-                                    pos,
-                                    lock.window_size,
-                                );
                             }
                         }
                     }
@@ -116,15 +192,21 @@ impl PopupApp {
                 self.drag_anchor = None;
                 lock.is_popup_open_in_ui = false;
             }
+        } else if let Some(activate) = pending_show {
+            if lock.is_visible {
+                if let Some(hwnd) = lock.win32_hwnd {
+                    ops.win32_ensure_borderless = Some(hwnd);
+                    ops.win32_show = Some((hwnd, lock.is_pinned, activate));
+                }
+            }
         }
 
         if !lock.is_visible {
-            return;
+            return ops;
         }
 
-        #[cfg(windows)]
         if let Some(hwnd) = lock.win32_hwnd {
-            crate::gui::ensure_borderless_popup_style_win32(hwnd);
+            ops.win32_ensure_borderless = Some(hwnd);
         }
 
         let focused = ui.input(|i| i.focused);
@@ -146,7 +228,7 @@ impl PopupApp {
                 .send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.last_visible = Some(false);
             self.was_focused = false;
-            return;
+            return ops;
         }
         self.was_focused = focused;
 
@@ -157,13 +239,7 @@ impl PopupApp {
                 let (w, h) = lock.window_size;
                 (ox + ((sw - w) / 2.0).max(10.0), oy + ((sh - h) / 2.0).max(10.0))
             });
-            crate::gui::apply_window_geometry(
-                ui.ctx(),
-                lock.x11_window,
-                lock.win32_hwnd,
-                pos,
-                lock.window_size,
-            );
+            queue_or_apply_geometry(ui.ctx(), &mut ops, lock, pos, lock.window_size);
             lock.window_pos = Some(pos);
             self.initial_sized = true;
         }
@@ -171,13 +247,7 @@ impl PopupApp {
         if lock.should_update_pos {
             if !lock.is_pinned {
                 if let Some(pos) = lock.window_pos {
-                    crate::gui::apply_window_geometry(
-                        ui.ctx(),
-                        lock.x11_window,
-                        lock.win32_hwnd,
-                        pos,
-                        lock.window_size,
-                    );
+                    queue_or_apply_geometry(ui.ctx(), &mut ops, lock, pos, lock.window_size);
                 }
             }
             lock.should_update_pos = false;
@@ -263,13 +333,7 @@ impl PopupApp {
                             actual_pos
                         };
                         self.placing = true;
-                        crate::gui::apply_window_geometry(
-                            ui.ctx(),
-                            lock.x11_window,
-                            Some(hwnd),
-                            pos,
-                            lock.window_size,
-                        );
+                        queue_or_apply_geometry(ui.ctx(), &mut ops, lock, pos, lock.window_size);
                         lock.window_pos = Some(pos);
                     } else {
                         if lock.window_pos.is_none() {
@@ -373,10 +437,10 @@ impl PopupApp {
 
                             lock.window_pos = Some((cur_x, cur_y));
                             lock.window_size = (cur_w, cur_h);
-                            crate::gui::apply_window_geometry(
+                            queue_or_apply_geometry(
                                 ui.ctx(),
-                                lock.x11_window,
-                                lock.win32_hwnd,
+                                &mut ops,
+                                lock,
                                 (cur_x, cur_y),
                                 (cur_w, cur_h),
                             );
@@ -530,7 +594,7 @@ impl PopupApp {
                                             }
                                         }
                                         lock.toggle_pin();
-                                        sync_window_level(&mut self.last_pinned, ui.ctx(), &lock);
+                                        sync_window_level(&mut self.last_pinned, ui.ctx(), lock, &mut ops);
                                         self.config.ui.pinned = lock.is_pinned;
                                         self.config.ui.pinned_pos = lock.window_pos;
                                         self.config.ui.pinned_size = Some(lock.window_size);
@@ -567,8 +631,8 @@ impl PopupApp {
                                             if let Some(pos) = target {
                                                 if lock.window_pos != Some(pos) {
                                                     lock.window_pos = Some(pos);
-                                                    crate::gui::apply_window_geometry(
-                                                        ui.ctx(), lock.x11_window, lock.win32_hwnd, pos, lock.window_size,
+                                                    queue_or_apply_geometry(
+                                                        ui.ctx(), &mut ops, lock, pos, lock.window_size,
                                                     );
                                                 }
                                             }
@@ -1039,6 +1103,8 @@ impl PopupApp {
             let text_to_trans = lock.edit_text.clone();
             lock.trigger_translate(&text_to_trans);
         }
+
+        ops
     }
 }
 
@@ -1150,6 +1216,7 @@ fn sync_window_level(
     last_pinned: &mut Option<bool>,
     ctx: &egui::Context,
     state: &SharedPopupState,
+    ops: &mut PostRenderOps,
 ) {
     if *last_pinned == Some(state.is_pinned) {
         return;
@@ -1160,7 +1227,11 @@ fn sync_window_level(
         egui::WindowLevel::Normal
     };
     ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
-    crate::gui::set_always_on_top(state.x11_window, state.win32_hwnd, state.is_pinned);
+    if let Some(hwnd) = state.win32_hwnd {
+        ops.win32_topmost = Some((hwnd, state.is_pinned));
+    } else {
+        crate::gui::set_always_on_top(state.x11_window, None, state.is_pinned);
+    }
     *last_pinned = Some(state.is_pinned);
 }
 

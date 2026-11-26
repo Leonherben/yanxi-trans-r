@@ -1,6 +1,6 @@
 [package]
 name = "yanxi-trans-r"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2024"
 rust-version = "1.85"
 authors = ["LeonHerben <herberten16@gmail.com>"]
@@ -43,11 +43,13 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Com",
     "Win32_System_DataExchange",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

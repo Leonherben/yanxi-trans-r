@@ -1,6 +1,8 @@
 pub mod fonts;
 pub mod popup;
 pub mod state;
+#[cfg(windows)]
+mod tray_win32;
 
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -289,6 +291,14 @@ pub fn ensure_borderless_popup_style_win32(hwnd: isize) {
 }
 
 #[cfg(windows)]
+pub fn wake_win32_window(hwnd: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, ShowWindowAsync};
+    unsafe {
+        let _ = ShowWindowAsync(hwnd_from_isize(hwnd), SW_SHOWNOACTIVATE);
+    }
+}
+
+#[cfg(windows)]
 pub fn show_and_raise_win32(hwnd: isize, always_on_top: bool, activate: bool) {
     use windows::Win32::UI::WindowsAndMessaging::{
         HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindowVisible, SW_RESTORE, SW_SHOW,
@@ -551,17 +561,33 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state_ipc = Arc::clone(&state);
     single_instance.listen_activations(move || {
         println!("[Yanxi] 🔔 收到外部进程激活唤醒指令");
-        if let Ok(mut lock) = state_ipc.lock() {
-            lock.mark_shown(std::time::Instant::now());
-            lock.should_update_pos = true;
-            #[cfg(windows)]
-            if let Some(hwnd) = lock.win32_hwnd {
-                show_and_raise_win32(hwnd, lock.is_pinned, true);
+        let (x11_win, win32_hwnd, is_pinned, ctx) = match state_ipc.lock() {
+            Ok(mut lock) => {
+                lock.mark_shown(std::time::Instant::now());
+                lock.should_update_pos = true;
+                lock.pending_win32_show = Some(true);
+                (
+                    lock.x11_window,
+                    lock.win32_hwnd,
+                    lock.is_pinned,
+                    lock.ctx.clone(),
+                )
             }
-            if !lock.is_pinned {
-                raise_window(lock.x11_window, lock.win32_hwnd);
+            Err(_) => return,
+        };
+        #[cfg(target_os = "linux")]
+        if !is_pinned {
+            if let Some(win) = x11_win {
+                raise_window_x11(win);
             }
-            lock.request_repaint();
+        }
+        #[cfg(windows)]
+        if let Some(hwnd) = win32_hwnd {
+            wake_win32_window(hwnd);
+        }
+        let _ = (x11_win, win32_hwnd, is_pinned);
+        if let Some(ctx) = ctx {
+            ctx.request_repaint();
         }
     });
 
@@ -581,8 +607,16 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             // Read only the current selection, never a previously copied clipboard item.
             // The selection helper has a bounded wait and runs outside the state lock.
             let selection = crate::selection::get_current_selection();
-            if let Ok(mut lock) = state_hotkey.lock() {
+            #[cfg(windows)]
+            let win32_cursor_area = cursor_pos_win32().map(|(px, py)| {
+                let (ox, oy, s_w, s_h) = monitor_work_area_for_point(px, py);
+                (px, py, ox, oy, s_w, s_h)
+            });
+
+            let snapshot = if let Ok(mut lock) = state_hotkey.lock() {
                 apply_hotkey_selection(&mut lock, selection.as_deref());
+                let mut x11_move = None;
+                let mut x11_raise = None;
                 if lock.is_visible && !lock.is_pinned {
                     #[cfg(target_os = "linux")]
                     {
@@ -602,22 +636,16 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     );
                                     lock.window_pos = Some(target_pos);
                                     if let Some(win) = lock.x11_window {
-                                        move_resize_x11(
-                                            win,
-                                            target_pos.0 as i32,
-                                            target_pos.1 as i32,
-                                            win_w as u32,
-                                            win_h as u32,
-                                        );
+                                        x11_move = Some((win, target_pos, (win_w, win_h)));
                                     }
                                 }
                             }
                         }
+                        x11_raise = lock.x11_window;
                     }
                     #[cfg(windows)]
                     {
-                        if let Some((px, py)) = cursor_pos_win32() {
-                            let (ox, oy, s_w, s_h) = monitor_work_area_for_point(px, py);
+                        if let Some((px, py, ox, oy, s_w, s_h)) = win32_cursor_area {
                             lock.screen_origin = (ox, oy);
                             lock.screen_size = (s_w, s_h);
                             lock.cursor_pos = (px, py);
@@ -630,33 +658,44 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 (ox, oy, s_w, s_h),
                             );
                             lock.window_pos = Some(target_pos);
-                            if let Some(hwnd) = lock.win32_hwnd {
-                                move_resize_win32(
-                                    hwnd,
-                                    target_pos.0.round() as i32,
-                                    target_pos.1.round() as i32,
-                                    win_w.round() as i32,
-                                    win_h.round() as i32,
-                                );
-                            }
                         }
                     }
-                    #[cfg(windows)]
-                    if let Some(hwnd) = lock.win32_hwnd {
-                        show_and_raise_win32(hwnd, lock.is_pinned, true);
-                    }
-                    #[cfg(not(windows))]
-                    raise_window(lock.x11_window, lock.win32_hwnd);
                     lock.should_update_pos = true;
-                } else {
-                    #[cfg(windows)]
-                    if lock.is_visible {
-                        if let Some(hwnd) = lock.win32_hwnd {
-                            show_and_raise_win32(hwnd, lock.is_pinned, true);
-                        }
+                }
+                if lock.is_visible {
+                    lock.pending_win32_show = Some(true);
+                }
+                Some((
+                    lock.is_visible,
+                    lock.win32_hwnd,
+                    x11_move,
+                    x11_raise,
+                    lock.ctx.clone(),
+                ))
+            } else {
+                None
+            };
+
+            if let Some((is_visible, win32_hwnd, x11_move, x11_raise, ctx)) = snapshot {
+                #[cfg(target_os = "linux")]
+                {
+                    if let Some((win, pos, size)) = x11_move {
+                        move_resize_x11(win, pos.0 as i32, pos.1 as i32, size.0 as u32, size.1 as u32);
+                    }
+                    if let Some(win) = x11_raise {
+                        raise_window_x11(win);
                     }
                 }
-                lock.request_repaint();
+                #[cfg(windows)]
+                if is_visible {
+                    if let Some(hwnd) = win32_hwnd {
+                        wake_win32_window(hwnd);
+                    }
+                }
+                let _ = (is_visible, win32_hwnd, x11_move, x11_raise);
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint();
+                }
             }
         },
         move |ok, message| {
@@ -667,6 +706,91 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         },
     );
+
+    #[cfg(windows)]
+    let _win_tray = {
+        let state_toggle = Arc::clone(&state);
+        let state_settings = Arc::clone(&state);
+        let state_exit = Arc::clone(&state);
+        let config_tray = config.clone();
+        tray_win32::start_tray_icon(
+            move || {
+                let win32_cursor_area = cursor_pos_win32().map(|(px, py)| {
+                    let (ox, oy, s_w, s_h) = monitor_work_area_for_point(px, py);
+                    (px, py, ox, oy, s_w, s_h)
+                });
+                let snapshot = if let Ok(mut lock) = state_toggle.lock() {
+                    if lock.is_visible {
+                        lock.hide_explicit();
+                    } else {
+                        lock.mark_shown(std::time::Instant::now());
+                        if !lock.is_pinned {
+                            if let Some((px, py, ox, oy, s_w, s_h)) = win32_cursor_area {
+                                lock.screen_origin = (ox, oy);
+                                lock.screen_size = (s_w, s_h);
+                                lock.cursor_pos = (px, py);
+                                let (win_w, win_h) = lock.window_size;
+                                let target_pos = SharedPopupState::compute_target_pos_in_bounds(
+                                    px,
+                                    py,
+                                    win_w,
+                                    win_h,
+                                    (ox, oy, s_w, s_h),
+                                );
+                                lock.window_pos = Some(target_pos);
+                            }
+                            lock.should_update_pos = true;
+                        }
+                        lock.pending_win32_show = Some(true);
+                    }
+                    Some((lock.is_visible, lock.win32_hwnd, lock.ctx.clone()))
+                } else {
+                    None
+                };
+                if let Some((is_visible, win32_hwnd, ctx)) = snapshot {
+                    if is_visible {
+                        if let Some(hwnd) = win32_hwnd {
+                            wake_win32_window(hwnd);
+                        }
+                    }
+                    if let Some(ctx) = ctx {
+                        ctx.request_repaint();
+                    }
+                }
+            },
+            move || {
+                let snapshot = if let Ok(mut lock) = state_settings.lock() {
+                    lock.mark_shown(std::time::Instant::now());
+                    lock.show_settings = true;
+                    let active_p = lock.active_provider.clone();
+                    lock.load_provider_settings(&config_tray, &active_p);
+                    lock.pending_win32_show = Some(true);
+                    Some((lock.win32_hwnd, lock.ctx.clone()))
+                } else {
+                    None
+                };
+                if let Some((win32_hwnd, ctx)) = snapshot {
+                    if let Some(hwnd) = win32_hwnd {
+                        wake_win32_window(hwnd);
+                    }
+                    if let Some(ctx) = ctx {
+                        ctx.request_repaint();
+                    }
+                }
+            },
+            move || {
+                let ctx = if let Ok(mut lock) = state_exit.lock() {
+                    lock.pending_win32_quit = true;
+                    lock.ctx.clone()
+                } else {
+                    None
+                };
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint();
+                }
+            },
+        )
+    };
 
     // 6. 启动后台 Tokio 异步工作运行时
     let state_clone = Arc::clone(&state);
@@ -1062,7 +1186,7 @@ async fn handle_worker_events(
                         );
                         println!("[Yanxi] 划词事件触发 @ ({}, {}): \"{}\"", pos.0, pos.1, text);
 
-                        let (provider_name, source_lang, target_lang) = {
+                        let (provider_name, source_lang, target_lang, ctx_to_wake) = {
                             let mut lock = match state.lock() {
                                 Ok(l) => l,
                                 Err(_) => continue,
@@ -1073,35 +1197,46 @@ async fn handle_worker_events(
                             if !lock.is_pinned {
                                 lock.window_pos = Some(target_pos);
                                 lock.should_update_pos = true;
-                                #[cfg(target_os = "linux")]
-                                if let Some(win) = x11_win {
-                                    move_resize_x11(win, target_pos.0 as i32, target_pos.1 as i32, win_w as u32, win_h as u32);
-                                }
-                                #[cfg(windows)]
-                                if let Some(hwnd) = win32_hwnd {
-                                    move_resize_win32(
-                                        hwnd,
-                                        target_pos.0.round() as i32,
-                                        target_pos.1.round() as i32,
-                                        win_w.round() as i32,
-                                        win_h.round() as i32,
-                                    );
-                                }
-                                raise_window(x11_win, win32_hwnd);
                             }
-                            let _ = (x11_win, win32_hwnd);
+                            lock.pending_win32_show = Some(false);
                             lock.mark_shown(std::time::Instant::now());
                             lock.edit_text = text.clone();
                             lock.status = TranslationStatus::Loading {
                                 original_text: text.clone(),
                             };
-                            lock.request_repaint();
                             (
                                 lock.active_provider.clone(),
                                 lock.source_lang.clone(),
                                 lock.target_lang.clone(),
+                                lock.ctx.clone(),
                             )
                         };
+                        if !is_pinned {
+                            #[cfg(target_os = "linux")]
+                            if let Some(win) = x11_win {
+                                move_resize_x11(
+                                    win,
+                                    target_pos.0 as i32,
+                                    target_pos.1 as i32,
+                                    win_w as u32,
+                                    win_h as u32,
+                                );
+                                raise_window_x11(win);
+                            }
+                            #[cfg(windows)]
+                            if let Some(hwnd) = win32_hwnd {
+                                wake_win32_window(hwnd);
+                            }
+                        } else {
+                            #[cfg(windows)]
+                            if let Some(hwnd) = win32_hwnd {
+                                wake_win32_window(hwnd);
+                            }
+                        }
+                        let _ = (x11_win, win32_hwnd);
+                        if let Some(ctx) = ctx_to_wake {
+                            ctx.request_repaint();
+                        }
 
                         next_request_id += 1;
                         let req_id = next_request_id;
