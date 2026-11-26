@@ -855,6 +855,7 @@ async fn handle_worker_events(
                             continue;
                         }
 
+                        let _ = (s_origin, s_size);
                         let (s_origin, s_size) = {
                             #[cfg(windows)]
                             {

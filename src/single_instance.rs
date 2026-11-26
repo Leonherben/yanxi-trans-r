@@ -220,8 +220,9 @@ mod platform {
                 std::thread::Builder::new()
                     .name("yanxi-ipc-listener".into())
                     .spawn(move || {
+                        let pipe = handle;
                         loop {
-                            let connected = unsafe { ConnectNamedPipe(handle.0, None) };
+                            let connected = unsafe { ConnectNamedPipe(pipe.0, None) };
                             match connected {
                                 Ok(()) => {}
                                 Err(err)
@@ -233,14 +234,14 @@ mod platform {
                             let mut buf = [0u8; 64];
                             let mut read = 0u32;
                             let ok = unsafe {
-                                ReadFile(handle.0, Some(&mut buf), Some(&mut read), None).is_ok()
+                                ReadFile(pipe.0, Some(&mut buf), Some(&mut read), None).is_ok()
                             };
                             if ok && read > 0 {
                                 on_activate();
                             }
 
                             unsafe {
-                                let _ = DisconnectNamedPipe(handle.0);
+                                let _ = DisconnectNamedPipe(pipe.0);
                             }
                         }
                     })
