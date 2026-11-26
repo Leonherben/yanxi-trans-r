@@ -10,6 +10,31 @@ pub mod windows;
 #[cfg(windows)]
 pub use windows::WindowsSelectionListener;
 
+use std::time::{Duration, Instant};
+
+const REPEAT_WINDOW: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+pub(crate) struct SelectionDedup {
+    last: Option<(String, Instant)>,
+}
+
+impl SelectionDedup {
+    pub(crate) fn accept(&mut self, text: &str, now: Instant) -> bool {
+        if self.last.as_ref().is_some_and(|(last, at)| {
+            last == text && now.saturating_duration_since(*at) < REPEAT_WINDOW
+        }) {
+            return false;
+        }
+        self.last = Some((text.to_owned(), now));
+        true
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.last = None;
+    }
+}
+
 /// 选词事件实体
 #[derive(Debug, Clone)]
 pub enum SelectionEvent {
@@ -18,6 +43,9 @@ pub enum SelectionEvent {
         pos: (i32, i32), // 鼠标当前屏幕绝对坐标 (x, y)
     },
     Cleared {
+        pos: (i32, i32),
+    },
+    OutsideClick {
         pos: (i32, i32),
     },
 }
@@ -61,45 +89,19 @@ pub fn validate_selection_text(text: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-/// 只读取当前 PRIMARY 选区；没有选区时不读取历史剪贴板。
+/// 只读取当前平台选区；Linux 仅读 PRIMARY，Windows 优先 UIA 并在必要时安全回退剪贴板。
 pub fn get_current_selection() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         linux_x11::get_current_selection()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        windows::get_current_selection()
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unicode_filter_counts_characters() {
-        assert_eq!(sanitize_selection_text(" 中文 ", 2, 2), Some("中文".into()));
-        assert!(sanitize_selection_text("中", 2, 3).is_none());
-        assert!(sanitize_selection_text("中文语", 1, 2).is_none());
-        assert!(sanitize_selection_text("。！？", 1, 10).is_none());
-    }
-
-    #[test]
-    fn manual_selection_validation_boundaries() {
-        let at_limit = "中".repeat(MAX_SELECTION_CHARS);
-        assert_eq!(validate_selection_text(&at_limit), Ok(at_limit.clone()));
-        assert!(
-            validate_selection_text(&(at_limit + "文"))
-                .unwrap_err()
-                .contains("3000")
-        );
-        assert!(validate_selection_text(" \n\t").is_err());
-        assert!(validate_selection_text("……？！").is_err());
-        assert_eq!(
-            validate_selection_text(" 你好，world！ "),
-            Ok("你好，world！".into())
-        );
     }
 }
 
@@ -143,5 +145,56 @@ pub fn create_selection_listener(
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         compile_error!("当前操作系统平台暂未支持划词监听器");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unicode_filter_counts_characters() {
+        assert_eq!(sanitize_selection_text(" 中文 ", 2, 2), Some("中文".into()));
+        assert!(sanitize_selection_text("中", 2, 3).is_none());
+        assert!(sanitize_selection_text("中文语", 1, 2).is_none());
+        assert!(sanitize_selection_text("。！？", 1, 10).is_none());
+    }
+
+    #[test]
+    fn manual_selection_validation_boundaries() {
+        let at_limit = "中".repeat(MAX_SELECTION_CHARS);
+        assert_eq!(validate_selection_text(&at_limit), Ok(at_limit.clone()));
+        assert!(
+            validate_selection_text(&(at_limit + "文"))
+                .unwrap_err()
+                .contains("3000")
+        );
+        assert!(validate_selection_text(" \n\t").is_err());
+        assert!(validate_selection_text("……？！").is_err());
+        assert_eq!(
+            validate_selection_text(" 你好，world！ "),
+            Ok("你好，world！".into())
+        );
+    }
+
+    #[test]
+    fn same_word_is_allowed_after_repeat_window() {
+        let mut dedup = SelectionDedup::default();
+        let start = Instant::now();
+        assert!(dedup.accept("你好", start));
+        assert!(!dedup.accept("你好", start + Duration::from_millis(499)));
+        // Rejected duplicates do not extend the window.
+        assert!(dedup.accept("你好", start + Duration::from_millis(500)));
+        assert!(!dedup.accept("你好", start + Duration::from_millis(501)));
+        assert!(dedup.accept("世界", start + Duration::from_millis(502)));
+    }
+
+    #[test]
+    fn clearing_allows_immediate_reselection() {
+        let mut dedup = SelectionDedup::default();
+        let now = Instant::now();
+        assert!(dedup.accept("同词", now));
+        dedup.clear();
+        assert!(dedup.accept("同词", now + Duration::from_millis(1)));
     }
 }

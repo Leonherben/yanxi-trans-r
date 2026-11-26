@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, ProviderConfig, SelectionMode};
 use crate::models::TranslationResult;
 use crate::tts::Accent;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,8 +75,14 @@ pub struct SharedPopupState {
     pub tx_command: Option<UnboundedSender<GuiCommand>>,
     pub tx_hotkey: Option<std::sync::mpsc::Sender<String>>,
     pub x11_window: Option<u32>,
+    pub win32_hwnd: Option<isize>,
+    pub screen_origin: (f32, f32),
     pub screen_size: (f32, f32),
     pub request_seq: u64,
+    pub last_shown_at: Option<Instant>,
+    pub last_outside_dismiss_at: Option<Instant>,
+    pub outside_dismiss_seq: u64,
+    pub is_popup_open_in_ui: bool,
 }
 
 impl SharedPopupState {
@@ -97,14 +103,30 @@ impl SharedPopupState {
             }
         }
 
+        let is_visible = !config.ui.start_hidden;
+        let window_pos = if config.ui.pinned {
+            config.ui.pinned_pos
+        } else {
+            None
+        };
+        let window_size = if config.ui.pinned {
+            config
+                .ui
+                .pinned_size
+                .map(|(w, h)| (w.max(380.0), h.max(220.0)))
+                .unwrap_or((500.0, 320.0))
+        } else {
+            (500.0, 320.0)
+        };
+
         Self {
-            is_visible: !config.ui.start_hidden,
-            is_pinned: false,
+            is_visible,
+            is_pinned: config.ui.pinned,
             selection_mode: config.selection.get_mode(),
             status: TranslationStatus::Idle,
             cursor_pos: (0, 0),
-            window_pos: None,
-            window_size: (500.0, 320.0),
+            window_pos,
+            window_size,
             should_update_pos: false,
             edit_text: String::new(),
             active_provider: active_p.clone(),
@@ -126,8 +148,14 @@ impl SharedPopupState {
             tx_command: None,
             tx_hotkey: None,
             x11_window: None,
+            win32_hwnd: None,
+            screen_origin: (0.0, 0.0),
             screen_size: (1920.0, 1080.0),
             request_seq: 0,
+            last_shown_at: is_visible.then(Instant::now),
+            last_outside_dismiss_at: None,
+            outside_dismiss_seq: 0,
+            is_popup_open_in_ui: false,
         }
     }
 
@@ -204,15 +232,123 @@ impl SharedPopupState {
         self.is_pinned = !self.is_pinned;
         // Discard any earlier automatic follow request. Manual movement remains available.
         self.should_update_pos = false;
+        self.last_outside_dismiss_at = None;
+        self.outside_dismiss_seq = self.outside_dismiss_seq.wrapping_add(1);
         println!(
             "[Yanxi GUI] {}",
             if self.is_pinned {
-                "窗口已固定"
+                "窗口已固定在最上方"
             } else {
                 "窗口已取消固定"
             }
         );
         self.request_repaint();
+    }
+
+    pub fn mark_shown(&mut self, now: Instant) {
+        self.is_visible = true;
+        self.last_shown_at = Some(now);
+        self.last_outside_dismiss_at = None;
+        self.outside_dismiss_seq = self.outside_dismiss_seq.wrapping_add(1);
+    }
+
+    pub fn hide_explicit(&mut self) {
+        self.is_visible = false;
+        self.show_settings = false;
+        self.last_outside_dismiss_at = None;
+        self.outside_dismiss_seq = self.outside_dismiss_seq.wrapping_add(1);
+        self.request_repaint();
+    }
+
+    pub fn dismiss_from_outside(&mut self, now: Instant) {
+        self.is_visible = false;
+        self.show_settings = false;
+        self.last_outside_dismiss_at = Some(now);
+        self.outside_dismiss_seq = self.outside_dismiss_seq.wrapping_add(1);
+        self.request_repaint();
+    }
+
+    pub fn should_dismiss_outside_click(
+        &self,
+        pos: (i32, i32),
+        window_rect: Option<((f32, f32), (f32, f32))>,
+        now: Instant,
+    ) -> bool {
+        if !self.is_visible || self.is_pinned || self.show_settings || self.is_popup_open_in_ui {
+            return false;
+        }
+        if self
+            .last_shown_at
+            .is_some_and(|shown| now.saturating_duration_since(shown) < Duration::from_millis(200))
+        {
+            return false;
+        }
+        let rect = window_rect.or_else(|| self.window_pos.map(|p| (p, self.window_size)));
+        if let Some(((wx, wy), (ww, wh))) = rect {
+            let px = pos.0 as f32;
+            let py = pos.1 as f32;
+            if px >= wx - 2.0 && px <= wx + ww + 2.0 && py >= wy - 2.0 && py <= wy + wh + 2.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Returns true if an outside click dismissed an unpinned popup.
+    pub fn handle_outside_click(
+        &mut self,
+        pos: (i32, i32),
+        window_rect: Option<((f32, f32), (f32, f32))>,
+        now: Instant,
+    ) -> bool {
+        if !self.should_dismiss_outside_click(pos, window_rect, now) {
+            return false;
+        }
+        self.dismiss_from_outside(now);
+        true
+    }
+
+    /// Schedule a deferred outside-click dismiss; any new selection before the
+    /// timer fires bumps `outside_dismiss_seq` and cancels the hide seamlessly.
+    pub fn schedule_outside_dismiss(
+        &mut self,
+        pos: (i32, i32),
+        window_rect: Option<((f32, f32), (f32, f32))>,
+        now: Instant,
+    ) -> Option<u64> {
+        if !self.should_dismiss_outside_click(pos, window_rect, now) {
+            return None;
+        }
+        self.outside_dismiss_seq = self.outside_dismiss_seq.wrapping_add(1);
+        Some(self.outside_dismiss_seq)
+    }
+
+    pub fn complete_scheduled_outside_dismiss(&mut self, seq: u64, now: Instant) -> bool {
+        if self.outside_dismiss_seq != seq
+            || !self.is_visible
+            || self.is_pinned
+            || self.show_settings
+            || self.is_popup_open_in_ui
+        {
+            return false;
+        }
+        self.dismiss_from_outside(now);
+        true
+    }
+
+    pub fn clamp_window_to_bounds(
+        pos: (f32, f32),
+        size: (f32, f32),
+        bounds: (f32, f32, f32, f32),
+    ) -> ((f32, f32), (f32, f32)) {
+        let (bx, by, bw, bh) = bounds;
+        let max_w = (bw - 20.0).max(380.0);
+        let max_h = (bh - 20.0).max(220.0);
+        let w = size.0.clamp(380.0, max_w);
+        let h = size.1.clamp(220.0, max_h);
+        let x = pos.0.clamp(bx + 10.0, (bx + bw - w - 10.0).max(bx + 10.0));
+        let y = pos.1.clamp(by + 10.0, (by + bh - h - 10.0).max(by + 10.0));
+        ((x, y), (w, h))
     }
 
     pub fn play_tts(&self, text: &str, accent: Accent) {
@@ -267,15 +403,35 @@ impl SharedPopupState {
         screen_w: f32,
         screen_h: f32,
     ) -> (f32, f32) {
+        Self::compute_target_pos_in_bounds(
+            cursor_x,
+            cursor_y,
+            win_w,
+            win_h,
+            (0.0, 0.0, screen_w, screen_h),
+        )
+    }
+
+    /// 在指定显示区域工作区边界 `(bounds_x, bounds_y, bounds_w, bounds_h)` 内计算弹窗位置
+    pub fn compute_target_pos_in_bounds(
+        cursor_x: i32,
+        cursor_y: i32,
+        win_w: f32,
+        win_h: f32,
+        bounds: (f32, f32, f32, f32),
+    ) -> (f32, f32) {
+        let (bounds_x, bounds_y, bounds_w, bounds_h) = bounds;
         let mut x = cursor_x as f32 + 12.0;
         let mut y = cursor_y as f32 + 16.0;
+        let max_x = bounds_x + bounds_w - 20.0;
+        let max_y = bounds_y + bounds_h - 40.0;
 
-        if x + win_w > screen_w - 20.0 {
-            x = (cursor_x as f32 - win_w - 12.0).max(10.0);
+        if x + win_w > max_x {
+            x = (cursor_x as f32 - win_w - 12.0).max(bounds_x + 10.0);
         }
 
-        if y + win_h > screen_h - 40.0 {
-            y = (cursor_y as f32 - win_h - 16.0).max(10.0);
+        if y + win_h > max_y {
+            y = (cursor_y as f32 - win_h - 16.0).max(bounds_y + 10.0);
         }
 
         (x, y)
@@ -420,5 +576,104 @@ mod tests {
         state.update_hotkey(" CTRL+ALT+T ");
         assert!(state.hotkey_feedback.is_none());
         assert_eq!(rx.recv().unwrap(), "ctrl+alt+t");
+    }
+
+    #[test]
+    fn target_pos_respects_negative_monitor_work_area_bounds() {
+        // Secondary monitor to the left of primary: x in [-1920, 0), y in [0, 1040).
+        let (x, y) = SharedPopupState::compute_target_pos_in_bounds(
+            -100,
+            950,
+            500.0,
+            320.0,
+            (-1920.0, 0.0, 1920.0, 1040.0),
+        );
+        assert!(x >= -1910.0 && x + 500.0 <= -20.0, "x out of bounds: {x}");
+        assert!(y >= 10.0 && y + 320.0 <= 1000.0, "y out of bounds: {y}");
+
+        let (lx, ly) = SharedPopupState::compute_target_pos_in_bounds(
+            -1900,
+            20,
+            500.0,
+            320.0,
+            (-1920.0, 0.0, 1920.0, 1040.0),
+        );
+        assert_eq!((lx, ly), (-1888.0, 36.0));
+    }
+
+    #[test]
+    fn outside_click_hides_unpinned_after_grace_and_respects_exemptions() {
+        let now = Instant::now();
+        let mut state = SharedPopupState::new(&AppConfig::default());
+        state.window_pos = Some((100.0, 100.0));
+        state.window_size = (400.0, 300.0);
+        state.mark_shown(now);
+
+        // Grace period prevents immediate dismissal right after popup opens.
+        assert!(!state.handle_outside_click((50, 50), None, now + Duration::from_millis(50)));
+        assert!(state.is_visible);
+
+        // Click inside popup bounds never dismisses.
+        assert!(!state.handle_outside_click((200, 200), None, now + Duration::from_millis(300)));
+        assert!(state.is_visible);
+
+        // Settings view exempts outside clicks.
+        state.show_settings = true;
+        assert!(!state.handle_outside_click((20, 20), None, now + Duration::from_millis(300)));
+        state.show_settings = false;
+
+        // Open UI popup (e.g., language dropdown) exempts outside clicks.
+        state.is_popup_open_in_ui = true;
+        assert!(!state.handle_outside_click((20, 20), None, now + Duration::from_millis(300)));
+        state.is_popup_open_in_ui = false;
+
+        // Pinned window stays visible on outside clicks.
+        state.toggle_pin();
+        assert!(!state.handle_outside_click((20, 20), None, now + Duration::from_millis(300)));
+        assert!(state.is_visible);
+
+        // Unpinned outside click dismisses and records timestamp.
+        state.toggle_pin();
+        assert!(state.handle_outside_click((20, 20), None, now + Duration::from_millis(300)));
+        assert!(!state.is_visible);
+        assert!(state.last_outside_dismiss_at.is_some());
+    }
+
+    #[test]
+    fn clamp_window_to_bounds_keeps_restored_pinned_window_on_screen() {
+        let (pos, size) = SharedPopupState::clamp_window_to_bounds(
+            (3000.0, 1800.0),
+            (600.0, 400.0),
+            (0.0, 0.0, 1920.0, 1080.0),
+        );
+        assert_eq!(size, (600.0, 400.0));
+        assert!(pos.0 + size.0 <= 1910.0);
+        assert!(pos.1 + size.1 <= 1070.0);
+    }
+
+    #[test]
+    fn scheduled_outside_dismiss_is_cancelled_by_new_selection_and_fires_on_blank_click() {
+        let now = Instant::now();
+        let mut state = SharedPopupState::new(&AppConfig::default());
+        state.window_pos = Some((100.0, 100.0));
+        state.window_size = (400.0, 300.0);
+        state.mark_shown(now);
+
+        // First click in a double-click schedules dismissal.
+        let seq1 = state
+            .schedule_outside_dismiss((20, 20), None, now + Duration::from_millis(300))
+            .expect("should schedule dismiss");
+
+        // Second click produces a selection before the timer fires -> cancels seq1.
+        state.mark_shown(now + Duration::from_millis(450));
+        assert!(!state.complete_scheduled_outside_dismiss(seq1, now + Duration::from_millis(650)));
+        assert!(state.is_visible);
+
+        // Clicking blank space schedules seq2 and dismisses once the delay elapses.
+        let seq2 = state
+            .schedule_outside_dismiss((20, 20), None, now + Duration::from_millis(900))
+            .expect("should schedule blank dismiss");
+        assert!(state.complete_scheduled_outside_dismiss(seq2, now + Duration::from_millis(1250)));
+        assert!(!state.is_visible);
     }
 }

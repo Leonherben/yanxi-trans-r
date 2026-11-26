@@ -1,4 +1,6 @@
+#[cfg(not(windows))]
 use std::io::Write;
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,7 @@ async fn fetch_audio(clean: &str, accent: Accent) -> Option<Vec<u8>> {
 
 /// Decode and play in RAM. Each player is tried by its real exit status, so a
 /// player that starts but cannot open the audio device falls through to the next.
+#[cfg(not(windows))]
 fn play_bytes(bytes: Vec<u8>) {
     tokio::task::spawn_blocking(move || {
         // 1. GStreamer streaming from stdin: no file at all.
@@ -174,6 +177,53 @@ fn play_bytes(bytes: Vec<u8>) {
                 "[Yanxi TTS] 未能通过系统音频服务播放 (已尝试 gst-launch-1.0 / pw-play / paplay / mpv)"
             );
         }
+    });
+}
+
+#[cfg(windows)]
+fn play_bytes(bytes: Vec<u8>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use windows::Win32::Media::Multimedia::mciSendStringW;
+    use windows::core::HSTRING;
+
+    static TTS_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    tokio::task::spawn_blocking(move || {
+        let pid = std::process::id();
+        let seq = TTS_SEQ.fetch_add(1, Ordering::Relaxed);
+        let (ext, mci_type) = if bytes.starts_with(b"RIFF") {
+            ("wav", "waveaudio")
+        } else {
+            ("mp3", "mpegvideo")
+        };
+        let temp_path = std::env::temp_dir().join(format!("yanxi_tts_{pid}_{seq}.{ext}"));
+        if std::fs::write(&temp_path, &bytes).is_err() {
+            eprintln!("[Yanxi TTS] 无法写入临时音频文件");
+            return;
+        }
+
+        let alias = format!("yanxi_tts_{pid}_{seq}");
+        let send_mci = |cmd: &str| -> u32 {
+            let wide = HSTRING::from(cmd);
+            unsafe { mciSendStringW(&wide, None, None) }
+        };
+
+        let open_cmd = format!(
+            "open \"{}\" type {mci_type} alias {alias}",
+            temp_path.display()
+        );
+        let open_err = send_mci(&open_cmd);
+        if open_err == 0 {
+            let play_err = send_mci(&format!("play {alias} wait"));
+            if play_err != 0 {
+                eprintln!("[Yanxi TTS] Windows 音频播放失败 (MCI 错误码: {play_err})");
+            }
+            let _ = send_mci(&format!("close {alias}"));
+        } else {
+            eprintln!("[Yanxi TTS] Windows 音频打开失败 (MCI 错误码: {open_err})");
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
     });
 }
 

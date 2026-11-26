@@ -25,69 +25,97 @@ thread_local! {
 }
 
 #[cfg(target_os = "linux")]
-pub fn move_resize_x11(win: u32, x: i32, y: i32, w: u32, h: u32) {
+fn with_x11_conn<R>(
+    f: impl FnOnce(&x11rb::rust_connection::RustConnection, usize, u32) -> R,
+) -> Option<R> {
     X11_CONN.with(|cell| {
         let mut opt = cell.borrow_mut();
         if opt.is_none() {
             if let Ok((conn, screen_num)) = x11rb::connect(None) {
                 use x11rb::protocol::xproto::ConnectionExt;
-                let atom_val =
-                    if let Ok(cookie) = conn.intern_atom(false, b"_NET_MOVERESIZE_WINDOW") {
-                        cookie.reply().map(|r| r.atom).ok()
-                    } else {
-                        None
-                    };
-                if let Some(atom) = atom_val {
+                if let Some(atom) = conn
+                    .intern_atom(false, b"_NET_MOVERESIZE_WINDOW")
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|r| r.atom)
+                {
                     *opt = Some((conn, screen_num, atom));
                 }
             }
         }
-        if let Some((conn, screen_num, atom)) = opt.as_ref() {
-            use x11rb::protocol::xproto::{
-                ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask,
-            };
-            let root = conn.setup().roots[*screen_num].root;
-            let flags = 0x0F01u32; // NorthWest + x + y + w + h
-            let data = [flags, x.max(0) as u32, y.max(0) as u32, w, h];
-            let event = ClientMessageEvent {
-                response_type: x11rb::protocol::xproto::CLIENT_MESSAGE_EVENT,
-                format: 32,
-                sequence: 0,
-                window: win,
-                type_: *atom,
-                data: ClientMessageData::from(data),
-            };
-            if let Ok(cookie) = conn.send_event(
-                false,
-                root,
-                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-                event,
-            ) {
-                let _ = cookie.check();
-                let _ = conn.flush();
-            }
-        }
+        opt.as_ref()
+            .map(|(conn, screen_num, atom)| f(conn, *screen_num, *atom))
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn move_resize_x11(win: u32, x: i32, y: i32, w: u32, h: u32) {
+    with_x11_conn(|conn, screen_num, atom| {
+        use x11rb::protocol::xproto::{
+            ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask,
+        };
+        let root = conn.setup().roots[screen_num].root;
+        let flags = 0x0F01u32; // NorthWest + x + y + w + h
+        let data = [flags, x.max(0) as u32, y.max(0) as u32, w, h];
+        let event = ClientMessageEvent {
+            response_type: x11rb::protocol::xproto::CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window: win,
+            type_: atom,
+            data: ClientMessageData::from(data),
+        };
+        // Avoid synchronous cookie.check() on every drag frame.
+        let _ = conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        );
+        let _ = conn.flush();
     });
 }
 
 #[cfg(target_os = "linux")]
 pub fn get_window_position_x11(win: u32) -> Option<(i32, i32)> {
-    if let Ok((conn, screen_num)) = x11rb::connect(None) {
+    with_x11_conn(|conn, screen_num, _| {
         use x11rb::protocol::xproto::ConnectionExt;
         let root = conn.setup().roots[screen_num].root;
-        if let Ok(cookie) = conn.translate_coordinates(win, root, 0, 0) {
-            if let Ok(reply) = cookie.reply() {
-                return Some((reply.dst_x as i32, reply.dst_y as i32));
-            }
-        }
+        conn.translate_coordinates(win, root, 0, 0)
+            .ok()?
+            .reply()
+            .ok()
+            .map(|reply| (reply.dst_x as i32, reply.dst_y as i32))
+    })
+    .flatten()
+}
+
+pub fn cursor_pos_screen() -> Option<(i32, i32)> {
+    #[cfg(target_os = "linux")]
+    {
+        with_x11_conn(|conn, screen_num, _| {
+            use x11rb::protocol::xproto::ConnectionExt;
+            let root = conn.setup().roots[screen_num].root;
+            conn.query_pointer(root)
+                .ok()?
+                .reply()
+                .ok()
+                .map(|reply| (reply.root_x as i32, reply.root_y as i32))
+        })
+        .flatten()
     }
-    None
+    #[cfg(windows)]
+    {
+        cursor_pos_win32()
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
-/// Clear WM window states that override an explicit size (maximized/fullscreen).
-#[cfg(target_os = "linux")]
-pub fn clear_maximized_state_x11(win: u32) {
+fn send_wm_state_x11(win: u32, action: u32, prop_names: &[&[u8]]) {
     use x11rb::protocol::xproto::{
         ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask,
     };
@@ -95,21 +123,11 @@ pub fn clear_maximized_state_x11(win: u32) {
         return;
     };
     let root = conn.setup().roots[screen_num].root;
-    let Ok(state) = conn.intern_atom(false, b"_NET_WM_STATE").map(|c| c.reply()) else {
+    let Ok(Ok(state)) = conn.intern_atom(false, b"_NET_WM_STATE").map(|c| c.reply()) else {
         return;
     };
-    let Ok(state) = state else {
-        return;
-    };
-    for name in [
-        b"_NET_WM_STATE_MAXIMIZED_VERT".as_slice(),
-        b"_NET_WM_STATE_MAXIMIZED_HORZ".as_slice(),
-        b"_NET_WM_STATE_FULLSCREEN".as_slice(),
-    ] {
-        let Ok(atom) = conn.intern_atom(false, name).map(|c| c.reply()) else {
-            continue;
-        };
-        let Ok(atom) = atom else {
+    for name in prop_names {
+        let Ok(Ok(atom)) = conn.intern_atom(false, name).map(|c| c.reply()) else {
             continue;
         };
         let event = ClientMessageEvent {
@@ -118,7 +136,7 @@ pub fn clear_maximized_state_x11(win: u32) {
             sequence: 0,
             window: win,
             type_: state.atom,
-            data: ClientMessageData::from([0u32, atom.atom, 0, 1, 0]),
+            data: ClientMessageData::from([action, atom.atom, 0, 1, 0]),
         };
         let _ = conn.send_event(
             false,
@@ -130,6 +148,36 @@ pub fn clear_maximized_state_x11(win: u32) {
     let _ = conn.flush();
 }
 
+/// Clear WM window states that override an explicit size (maximized/fullscreen).
+#[cfg(target_os = "linux")]
+pub fn clear_maximized_state_x11(win: u32) {
+    send_wm_state_x11(
+        win,
+        0,
+        &[
+            b"_NET_WM_STATE_MAXIMIZED_VERT",
+            b"_NET_WM_STATE_MAXIMIZED_HORZ",
+            b"_NET_WM_STATE_FULLSCREEN",
+        ],
+    );
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_always_on_top_x11(win: u32, always_on_top: bool) {
+    let action = if always_on_top { 1 } else { 0 };
+    send_wm_state_x11(win, action, &[b"_NET_WM_STATE_ABOVE"]);
+}
+
+#[cfg(target_os = "linux")]
+pub fn raise_window_x11(win: u32) {
+    use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt, StackMode};
+    if let Ok((conn, _)) = x11rb::connect(None) {
+        let _ = conn.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        let _ = conn.flush();
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn get_window_geometry_x11(win: u32) -> Option<((f32, f32), (f32, f32))> {
     use x11rb::protocol::xproto::ConnectionExt;
     let (conn, screen_num) = x11rb::connect(None).ok()?;
@@ -146,16 +194,142 @@ pub fn get_window_geometry_x11(win: u32) -> Option<((f32, f32), (f32, f32))> {
     ))
 }
 
+#[cfg(windows)]
+fn hwnd_from_isize(hwnd: isize) -> windows::Win32::Foundation::HWND {
+    windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void)
+}
+
+#[cfg(windows)]
+pub fn move_resize_win32(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd_from_isize(hwnd),
+            None,
+            x,
+            y,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(windows)]
+pub fn set_always_on_top_win32(hwnd: isize, always_on_top: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    let insert_after = if always_on_top {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd_from_isize(hwnd),
+            Some(insert_after),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(windows)]
+pub fn raise_window_win32(hwnd: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd_from_isize(hwnd),
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+pub fn set_always_on_top(x11_window: Option<u32>, win32_hwnd: Option<isize>, always_on_top: bool) {
+    #[cfg(target_os = "linux")]
+    if let Some(win) = x11_window {
+        set_always_on_top_x11(win, always_on_top);
+    }
+    #[cfg(windows)]
+    if let Some(hwnd) = win32_hwnd {
+        set_always_on_top_win32(hwnd, always_on_top);
+    }
+    let _ = (x11_window, win32_hwnd, always_on_top);
+}
+
+pub fn raise_window(x11_window: Option<u32>, win32_hwnd: Option<isize>) {
+    #[cfg(target_os = "linux")]
+    if let Some(win) = x11_window {
+        raise_window_x11(win);
+    }
+    #[cfg(windows)]
+    if let Some(hwnd) = win32_hwnd {
+        raise_window_win32(hwnd);
+    }
+    let _ = (x11_window, win32_hwnd);
+}
+
+#[cfg(windows)]
+pub fn get_window_geometry_win32(hwnd: isize) -> Option<((f32, f32), (f32, f32))> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd_from_isize(hwnd), &mut rect).ok()? };
+    let w = (rect.right - rect.left).max(1) as f32;
+    let h = (rect.bottom - rect.top).max(1) as f32;
+    Some(((rect.left as f32, rect.top as f32), (w, h)))
+}
+
+#[cfg(windows)]
+pub fn cursor_pos_win32() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT::default();
+    unsafe { GetCursorPos(&mut pt).ok()? };
+    Some((pt.x, pt.y))
+}
+
+#[cfg(windows)]
+pub fn monitor_work_area_for_point(px: i32, py: i32) -> (f32, f32, f32, f32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    };
+    let monitor = unsafe { MonitorFromPoint(POINT { x: px, y: py }, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
+        let w = (info.rcWork.right - info.rcWork.left).max(400) as f32;
+        let h = (info.rcWork.bottom - info.rcWork.top).max(300) as f32;
+        return (info.rcWork.left as f32, info.rcWork.top as f32, w, h);
+    }
+    (0.0, 0.0, 1920.0, 1080.0)
+}
+
 /// State geometry is always in physical pixels. Do not send a second logical
-/// move after a native X11 move: mixed units make windows jump at 2x scaling.
+/// move after a native X11/Win32 move: mixed units make windows jump at high DPI.
 pub fn apply_window_geometry(
     ctx: &eframe::egui::Context,
-    window: Option<u32>,
+    x11_window: Option<u32>,
+    win32_hwnd: Option<isize>,
     pos: (f32, f32),
     size: (f32, f32),
 ) {
     #[cfg(target_os = "linux")]
-    if let Some(window) = window {
+    if let Some(window) = x11_window {
         move_resize_x11(
             window,
             pos.0.round() as i32,
@@ -165,6 +339,18 @@ pub fn apply_window_geometry(
         );
         return;
     }
+    #[cfg(windows)]
+    if let Some(hwnd) = win32_hwnd {
+        move_resize_win32(
+            hwnd,
+            pos.0.round() as i32,
+            pos.1.round() as i32,
+            size.0.round() as i32,
+            size.1.round() as i32,
+        );
+        return;
+    }
+    let _ = (x11_window, win32_hwnd);
     let scale = ctx.pixels_per_point();
     ctx.send_viewport_cmd(eframe::egui::ViewportCommand::OuterPosition(
         eframe::egui::pos2(pos.0 / scale, pos.1 / scale),
@@ -221,13 +407,16 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     single_instance.listen_activations(move || {
         println!("[Yanxi GUI] 🔔 收到外部进程激活唤醒指令");
         if let Ok(mut lock) = state_ipc.lock() {
-            lock.is_visible = true;
+            lock.mark_shown(std::time::Instant::now());
             lock.should_update_pos = true;
+            if !lock.is_pinned {
+                raise_window(lock.x11_window, lock.win32_hwnd);
+            }
             lock.request_repaint();
         }
     });
 
-    // 5. 注册 X11 全局快捷键监听 (默认 Alt + Q，支持动态热重载)
+    // 5. 注册全局快捷键监听 (默认 Alt + Q，支持动态热重载)
     let (tx_hotkey, rx_hotkey) = std::sync::mpsc::channel::<String>();
     {
         let mut lock = state.lock().unwrap();
@@ -276,6 +465,34 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }
                         }
                     }
+                    #[cfg(windows)]
+                    {
+                        if let Some((px, py)) = cursor_pos_win32() {
+                            let (ox, oy, s_w, s_h) = monitor_work_area_for_point(px, py);
+                            lock.screen_origin = (ox, oy);
+                            lock.screen_size = (s_w, s_h);
+                            lock.cursor_pos = (px, py);
+                            let (win_w, win_h) = lock.window_size;
+                            let target_pos = SharedPopupState::compute_target_pos_in_bounds(
+                                px,
+                                py,
+                                win_w,
+                                win_h,
+                                (ox, oy, s_w, s_h),
+                            );
+                            lock.window_pos = Some(target_pos);
+                            if let Some(hwnd) = lock.win32_hwnd {
+                                move_resize_win32(
+                                    hwnd,
+                                    target_pos.0.round() as i32,
+                                    target_pos.1.round() as i32,
+                                    win_w.round() as i32,
+                                    win_h.round() as i32,
+                                );
+                            }
+                        }
+                    }
+                    raise_window(lock.x11_window, lock.win32_hwnd);
                     lock.should_update_pos = true;
                 }
                 lock.request_repaint();
@@ -314,36 +531,74 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             });
         })?;
 
-    // 7. 在主线程启动 eframe 原生无边框透明视口 (使用 OpenGL Glow 后端，配合 Utility 窗口类型消除 X11 屏闪)
+    // 7. 在主线程启动 eframe 原生无边框透明视口 (使用 OpenGL Glow 后端，配合 Utility/无任务栏窗口类型)
     #[cfg(target_os = "linux")]
-    let (init_w, init_h) = x11rb::connect(None)
+    let (init_origin, init_screen, (init_w, init_h)) = x11rb::connect(None)
         .ok()
         .map(|(conn, screen_num)| {
             let root = &conn.setup().roots[screen_num];
-            default_window_size(root.width_in_pixels as f32, root.height_in_pixels as f32)
+            let sw = root.width_in_pixels as f32;
+            let sh = root.height_in_pixels as f32;
+            ((0.0, 0.0), (sw, sh), default_window_size(sw, sh))
         })
-        .unwrap_or((500.0, 320.0));
-    #[cfg(not(target_os = "linux"))]
-    let (init_w, init_h) = (500.0, 320.0);
+        .unwrap_or(((0.0, 0.0), (1920.0, 1080.0), (500.0, 320.0)));
+    #[cfg(windows)]
+    let (init_origin, init_screen, (init_w, init_h)) = {
+        let (px, py) = cursor_pos_win32().unwrap_or((0, 0));
+        let (ox, oy, sw, sh) = monitor_work_area_for_point(px, py);
+        ((ox, oy), (sw, sh), default_window_size(sw, sh))
+    };
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let (init_origin, init_screen, (init_w, init_h)) =
+        ((0.0, 0.0), (1920.0, 1080.0), (500.0, 320.0));
 
-    if let Ok(mut lock) = state.lock() {
-        lock.window_size = (init_w, init_h);
-    }
+    let (start_pos, start_size) = if let Ok(mut lock) = state.lock() {
+        lock.screen_origin = init_origin;
+        lock.screen_size = init_screen;
+        if config.ui.pinned {
+            let raw_size = config.ui.pinned_size.unwrap_or((init_w, init_h));
+            let raw_pos = config.ui.pinned_pos.unwrap_or((
+                init_origin.0 + ((init_screen.0 - raw_size.0) / 2.0).max(10.0),
+                init_origin.1 + ((init_screen.1 - raw_size.1) / 2.0).max(10.0),
+            ));
+            let (clamped_pos, clamped_size) = SharedPopupState::clamp_window_to_bounds(
+                raw_pos,
+                raw_size,
+                (init_origin.0, init_origin.1, init_screen.0, init_screen.1),
+            );
+            lock.window_pos = Some(clamped_pos);
+            lock.window_size = clamped_size;
+            (Some(clamped_pos), clamped_size)
+        } else {
+            lock.window_size = (init_w, init_h);
+            (None, (init_w, init_h))
+        }
+    } else {
+        (None, (init_w, init_h))
+    };
+
+    let initial_level = if config.ui.pinned {
+        eframe::egui::WindowLevel::AlwaysOnTop
+    } else {
+        eframe::egui::WindowLevel::Normal
+    };
 
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([init_w, init_h])
+            .with_inner_size([start_size.0, start_size.1])
             .with_min_inner_size([380.0, 220.0])
             .with_decorations(false)
             .with_transparent(true)
-            .with_always_on_top()
+            .with_window_level(initial_level)
             .with_active(false)
+            .with_taskbar(false)
             .with_resizable(true)
             .with_window_type(eframe::egui::X11WindowType::Utility),
         ..Default::default()
     };
 
+    let initial_pinned = config.ui.pinned;
     let state_app = Arc::clone(&state);
     eframe::run_native(
         "yanxi-popup",
@@ -356,12 +611,48 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             // different yanxi window when several instances are visible.
             #[cfg(target_os = "linux")]
             if let Some(win) = find_own_popup_window(std::process::id()) {
-                apply_popup_window_role(win);
-                center_popup_window(win);
+                apply_popup_window_role(win, initial_pinned);
+                if let Some(pos) = start_pos {
+                    move_resize_x11(
+                        win,
+                        pos.0.round() as i32,
+                        pos.1.round() as i32,
+                        start_size.0.round() as u32,
+                        start_size.1.round() as u32,
+                    );
+                } else {
+                    center_popup_window(win);
+                }
                 if let Ok(mut lock) = state_app.lock() {
                     lock.x11_window = Some(win);
                 }
             }
+            #[cfg(windows)]
+            {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = cc.window_handle() {
+                    if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                        let hwnd = win32.hwnd.get();
+                        let pos = start_pos.unwrap_or((
+                            init_origin.0 + ((init_screen.0 - start_size.0) / 2.0).max(10.0),
+                            init_origin.1 + ((init_screen.1 - start_size.1) / 2.0).max(10.0),
+                        ));
+                        set_always_on_top_win32(hwnd, initial_pinned);
+                        move_resize_win32(
+                            hwnd,
+                            pos.0.round() as i32,
+                            pos.1.round() as i32,
+                            start_size.0.round() as i32,
+                            start_size.1.round() as i32,
+                        );
+                        if let Ok(mut lock) = state_app.lock() {
+                            lock.win32_hwnd = Some(hwnd);
+                            lock.window_pos = Some(pos);
+                        }
+                    }
+                }
+            }
+            let _ = (start_pos, start_size, initial_pinned);
             if let Ok(mut lock) = state_app.lock() {
                 lock.ctx = Some(cc.egui_ctx.clone());
             }
@@ -418,9 +709,9 @@ fn find_own_popup_window(pid: u32) -> Option<u32> {
     None
 }
 
-/// Mark the window as a non-taskbar popup and keep it above normal windows.
+/// Mark the window as a non-taskbar popup and sync always-on-top state.
 #[cfg(target_os = "linux")]
-fn apply_popup_window_role(win: u32) {
+fn apply_popup_window_role(win: u32, always_on_top: bool) {
     let Ok((conn, screen_num)) = x11rb::connect(None) else {
         return;
     };
@@ -431,15 +722,15 @@ fn apply_popup_window_role(win: u32) {
     let Ok(state_atom) = state_atom else {
         return;
     };
-    let atoms: Vec<u32> = [
-        "_NET_WM_STATE_SKIP_TASKBAR",
-        "_NET_WM_STATE_SKIP_PAGER",
-        "_NET_WM_STATE_ABOVE",
-    ]
-    .iter()
-    .filter_map(|name| conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok())
-    .map(|reply| reply.atom)
-    .collect();
+    let mut names = vec!["_NET_WM_STATE_SKIP_TASKBAR", "_NET_WM_STATE_SKIP_PAGER"];
+    if always_on_top {
+        names.push("_NET_WM_STATE_ABOVE");
+    }
+    let atoms: Vec<u32> = names
+        .iter()
+        .filter_map(|name| conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok())
+        .map(|reply| reply.atom)
+        .collect();
     let _ = conn.change_property32(
         PropMode::APPEND,
         win,
@@ -473,20 +764,20 @@ fn center_popup_window(win: u32) {
 }
 
 fn apply_hotkey_selection(state: &mut SharedPopupState, selection: Option<&str>) {
+    let now = std::time::Instant::now();
     match selection {
         Some(text) => match crate::selection::validate_selection_text(text) {
             Ok(clean) if state.is_visible && clean == state.edit_text && !state.show_settings => {
-                state.is_visible = false;
-                state.show_settings = false;
+                state.hide_explicit();
             }
             Ok(clean) => {
-                state.is_visible = true;
+                state.mark_shown(now);
                 state.show_settings = false;
                 state.edit_text = clean.clone();
                 state.trigger_translate(&clean);
             }
             Err(message) => {
-                state.is_visible = true;
+                state.mark_shown(now);
                 state.show_settings = false;
                 state.status = TranslationStatus::Error {
                     original_text: String::new(),
@@ -495,9 +786,10 @@ fn apply_hotkey_selection(state: &mut SharedPopupState, selection: Option<&str>)
             }
         },
         None => {
-            state.is_visible = !state.is_visible;
-            if !state.is_visible {
-                state.show_settings = false;
+            if state.is_visible {
+                state.hide_explicit();
+            } else {
+                state.mark_shown(now);
             }
         }
     }
@@ -519,7 +811,17 @@ async fn handle_worker_events(
             Some(event) = rx_sel.recv() => {
                 match event {
                     SelectionEvent::Selected { text, pos } => {
-                        let (mode, is_visible, is_pinned, s_w, s_h, x11_win, window_size) = {
+                        let (
+                            mode,
+                            is_visible,
+                            is_pinned,
+                            last_outside_dismiss_at,
+                            s_origin,
+                            s_size,
+                            x11_win,
+                            win32_hwnd,
+                            window_size,
+                        ) = {
                             let lock = match state.lock() {
                                 Ok(l) => l,
                                 Err(_) => continue,
@@ -528,9 +830,11 @@ async fn handle_worker_events(
                                 lock.selection_mode,
                                 lock.is_visible,
                                 lock.is_pinned,
-                                lock.screen_size.0,
-                                lock.screen_size.1,
+                                lock.last_outside_dismiss_at,
+                                lock.screen_origin,
+                                lock.screen_size,
                                 lock.x11_window,
+                                lock.win32_hwnd,
                                 lock.window_size,
                             )
                         };
@@ -540,13 +844,37 @@ async fn handle_worker_events(
                             // 手动模式：划选不触发弹窗
                             continue;
                         }
-                        if mode == SelectionMode::Companion && !is_visible && !is_pinned {
+                        let recently_auto_dismissed = last_outside_dismiss_at
+                            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(700));
+                        if mode == SelectionMode::Companion
+                            && !is_visible
+                            && !is_pinned
+                            && !recently_auto_dismissed
+                        {
                             // 伴随阅读模式：悬浮窗未打开且未固定，静默不打扰
                             continue;
                         }
 
+                        let (s_origin, s_size) = {
+                            #[cfg(windows)]
+                            {
+                                let (ox, oy, sw, sh) = monitor_work_area_for_point(pos.0, pos.1);
+                                ((ox, oy), (sw, sh))
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                (s_origin, s_size)
+                            }
+                        };
+
                         let (win_w, win_h) = window_size;
-                        let target_pos = SharedPopupState::compute_target_pos(pos.0, pos.1, win_w, win_h, s_w, s_h);
+                        let target_pos = SharedPopupState::compute_target_pos_in_bounds(
+                            pos.0,
+                            pos.1,
+                            win_w,
+                            win_h,
+                            (s_origin.0, s_origin.1, s_size.0, s_size.1),
+                        );
                         println!("[Yanxi GUI] 划词事件触发 @ ({}, {}): \"{}\"", pos.0, pos.1, text);
 
                         let (provider_name, source_lang, target_lang) = {
@@ -554,6 +882,8 @@ async fn handle_worker_events(
                                 Ok(l) => l,
                                 Err(_) => continue,
                             };
+                            lock.screen_origin = s_origin;
+                            lock.screen_size = s_size;
                             lock.cursor_pos = pos;
                             if !lock.is_pinned {
                                 lock.window_pos = Some(target_pos);
@@ -562,8 +892,20 @@ async fn handle_worker_events(
                                 if let Some(win) = x11_win {
                                     move_resize_x11(win, target_pos.0 as i32, target_pos.1 as i32, win_w as u32, win_h as u32);
                                 }
+                                #[cfg(windows)]
+                                if let Some(hwnd) = win32_hwnd {
+                                    move_resize_win32(
+                                        hwnd,
+                                        target_pos.0.round() as i32,
+                                        target_pos.1.round() as i32,
+                                        win_w.round() as i32,
+                                        win_h.round() as i32,
+                                    );
+                                }
+                                raise_window(x11_win, win32_hwnd);
                             }
-                            lock.is_visible = true;
+                            let _ = (x11_win, win32_hwnd);
+                            lock.mark_shown(std::time::Instant::now());
                             lock.edit_text = text.clone();
                             lock.status = TranslationStatus::Loading {
                                 original_text: text.clone(),
@@ -604,7 +946,63 @@ async fn handle_worker_events(
                     }
                     SelectionEvent::Cleared { .. } => {
                         // 选区取消时不粗暴关闭悬浮窗，保留窗口供用户查阅译文、发音及复制。
-                        // 用户可通过快捷键 (默认 Alt+Q) 或右上角 "×" 轻松收起。
+                    }
+                    SelectionEvent::OutsideClick { pos } => {
+                        let (should_check, mode, x11_win, win32_hwnd) = match state.lock() {
+                            Ok(lock) => (
+                                lock.is_visible && !lock.is_pinned && !lock.show_settings,
+                                lock.selection_mode,
+                                lock.x11_window,
+                                lock.win32_hwnd,
+                            ),
+                            Err(_) => continue,
+                        };
+                        if !should_check {
+                            continue;
+                        }
+                        let native_rect = {
+                            #[cfg(target_os = "linux")]
+                            {
+                                let _ = win32_hwnd;
+                                x11_win.and_then(get_window_geometry_x11)
+                            }
+                            #[cfg(windows)]
+                            {
+                                let _ = x11_win;
+                                win32_hwnd.and_then(get_window_geometry_win32)
+                            }
+                            #[cfg(not(any(target_os = "linux", windows)))]
+                            {
+                                let _ = (x11_win, win32_hwnd);
+                                None
+                            }
+                        };
+                        if mode == SelectionMode::Companion {
+                            let seq = state.lock().ok().and_then(|mut lock| {
+                                lock.schedule_outside_dismiss(
+                                    pos,
+                                    native_rect,
+                                    std::time::Instant::now(),
+                                )
+                            });
+                            if let Some(seq) = seq {
+                                let state_timer = Arc::clone(&state);
+                                let delay_ms =
+                                    config.selection.debounce_ms.saturating_add(220).max(320);
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                        .await;
+                                    if let Ok(mut lock) = state_timer.lock() {
+                                        lock.complete_scheduled_outside_dismiss(
+                                            seq,
+                                            std::time::Instant::now(),
+                                        );
+                                    }
+                                });
+                            }
+                        } else if let Ok(mut lock) = state.lock() {
+                            lock.handle_outside_click(pos, native_rect, std::time::Instant::now());
+                        }
                     }
                 }
             }

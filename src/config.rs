@@ -31,9 +31,9 @@ impl Default for ProviderConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SelectionMode {
+    Automatic, // 划选即翻译：任意划选自动弹窗显示在词下方
     #[default]
-    Automatic, // 划选即翻译 (默认)：任意划选自动弹窗显示在词下方
-    Companion, // 伴随阅读：仅浮窗可见/固定时划词才自动刷新；关闭时静默
+    Companion, // 按需划词 (默认)：平时静默仅热键唤醒，弹窗打开后选词自动连续翻译
     Manual,    // 手动模式：划选不弹窗
 }
 
@@ -59,8 +59,8 @@ impl Default for SelectionConfig {
         Self {
             enable_x11_primary: true,
             auto_popup_on_selection: true,
-            auto_popup_only_when_visible: false,
-            mode: SelectionMode::Automatic,
+            auto_popup_only_when_visible: true,
+            mode: SelectionMode::Companion,
             hotkey: default_hotkey(),
             debounce_ms: 150,
         }
@@ -97,6 +97,12 @@ pub struct UIConfig {
     pub splitter_ratio: f32,
     #[serde(default)]
     pub start_hidden: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub pinned_pos: Option<(f32, f32)>,
+    #[serde(default)]
+    pub pinned_size: Option<(f32, f32)>,
 }
 
 fn default_splitter_ratio() -> f32 {
@@ -108,6 +114,9 @@ impl Default for UIConfig {
         Self {
             splitter_ratio: default_splitter_ratio(),
             start_hidden: false,
+            pinned: false,
+            pinned_pos: None,
+            pinned_size: None,
         }
     }
 }
@@ -291,6 +300,8 @@ mod tests {
     fn test_default_config() {
         let config = AppConfig::default();
         assert_eq!(config.selection.hotkey, "alt+q");
+        assert_eq!(config.selection.get_mode(), SelectionMode::Companion);
+        assert!(config.selection.auto_popup_only_when_visible);
         assert_eq!(config.ui.splitter_ratio, 0.33);
         assert!(!config.ui.start_hidden);
         assert_eq!(config.active_provider, "microsoft");
@@ -323,5 +334,27 @@ mod ui_compatibility_tests {
         let loaded: AppConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert!(loaded.ui.start_hidden);
+    }
+
+    #[test]
+    fn pin_preference_defaults_for_legacy_and_round_trips() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value["ui"].as_object_mut().unwrap().remove("pinned");
+        value["ui"].as_object_mut().unwrap().remove("pinned_pos");
+        value["ui"].as_object_mut().unwrap().remove("pinned_size");
+        let legacy: AppConfig = serde_json::from_value(value).unwrap();
+        assert!(!legacy.ui.pinned);
+        assert!(legacy.ui.pinned_pos.is_none());
+        assert!(legacy.ui.pinned_size.is_none());
+
+        let mut config = AppConfig::default();
+        config.ui.pinned = true;
+        config.ui.pinned_pos = Some((120.0, 240.0));
+        config.ui.pinned_size = Some((520.0, 360.0));
+        let loaded: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(loaded.ui.pinned);
+        assert_eq!(loaded.ui.pinned_pos, Some((120.0, 240.0)));
+        assert_eq!(loaded.ui.pinned_size, Some((520.0, 360.0)));
     }
 }

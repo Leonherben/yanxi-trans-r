@@ -387,8 +387,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 cli.json,
                             ).await;
                         }
-                        yanxi_trans_r::selection::SelectionEvent::Cleared { .. } => {
-                            // 选区清空通知 (供 Phase 3 悬浮弹窗收起联动)
+                        yanxi_trans_r::selection::SelectionEvent::Cleared { .. }
+                        | yanxi_trans_r::selection::SelectionEvent::OutsideClick { .. } => {
+                            // 选区清空/外部点击通知仅在 GUI 悬浮窗模式使用
                         }
                     }
                 }

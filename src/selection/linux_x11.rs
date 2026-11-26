@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
 use x11rb::protocol::xfixes;
+use x11rb::protocol::xinput;
 use x11rb::protocol::xproto::{
     self, AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, KeyButMask, WindowClass,
 };
@@ -11,30 +12,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::rust_connection::{DefaultStream, PollMode, Stream};
 use x11rb::utils::RawFdContainer;
 
-use super::{SelectionEvent, SelectionListener, sanitize_selection_text};
-
-const REPEAT_WINDOW: Duration = Duration::from_millis(500);
-
-#[derive(Default)]
-struct SelectionDedup {
-    last: Option<(String, Instant)>,
-}
-
-impl SelectionDedup {
-    fn accept(&mut self, text: &str, now: Instant) -> bool {
-        if self.last.as_ref().is_some_and(|(last, at)| {
-            last == text && now.saturating_duration_since(*at) < REPEAT_WINDOW
-        }) {
-            return false;
-        }
-        self.last = Some((text.to_owned(), now));
-        true
-    }
-
-    fn clear(&mut self) {
-        self.last = None;
-    }
-}
+use super::{SelectionDedup, SelectionEvent, SelectionListener, sanitize_selection_text};
 
 /// x11rb's default poll can wait indefinitely. This stream bounds handshake,
 /// property replies, and flushing as well as the selection notification itself.
@@ -380,11 +358,33 @@ impl SelectionListener for LinuxX11SelectionListener {
                     return;
                 }
 
+                // 被动监听根窗口原始鼠标按键释放，用于未固定弹窗的外部点击自动收起（零指针抓取）
+                let xinput_ready = xinput::xi_query_version(&conn, 2, 0)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .is_some()
+                    && xinput::xi_select_events(
+                        &conn,
+                        root,
+                        &[xinput::EventMask {
+                            deviceid: 1, // XIAllMasterDevices
+                            mask: vec![
+                                xinput::XIEventMask::RAW_BUTTON_PRESS
+                                    | xinput::XIEventMask::RAW_BUTTON_RELEASE,
+                            ],
+                        }],
+                    )
+                    .is_ok();
+                if !xinput_ready {
+                    eprintln!("[Yanxi X11] XInput2 被动鼠标监听不可用，将仅保留失焦自动收起");
+                }
+
                 let _ = conn.flush();
                 println!("[Yanxi X11] 🎯 X11 选区监听线程启动完成");
 
                 let mut pending_pos: Option<(i32, i32)> = None;
                 let mut dedup = SelectionDedup::default();
+                let mut last_button_press: Option<(u32, (i32, i32))> = None;
 
                 while is_running.load(Ordering::SeqCst) {
                     let event = match conn.poll_for_event() {
@@ -497,6 +497,37 @@ impl SelectionListener for LinuxX11SelectionListener {
                                 }
                             }
                         }
+                        x11rb::protocol::Event::XinputRawButtonPress(ev) => {
+                            if matches!(ev.detail, 1..=3) {
+                                if let Some(pos) = xproto::query_pointer(&conn, root)
+                                    .ok()
+                                    .and_then(|c| c.reply().ok())
+                                    .map(|p| (p.root_x as i32, p.root_y as i32))
+                                {
+                                    last_button_press = Some((ev.detail, pos));
+                                }
+                            }
+                        }
+                        x11rb::protocol::Event::XinputRawButtonRelease(ev) => {
+                            if matches!(ev.detail, 1..=3) {
+                                if let Some(pos) = xproto::query_pointer(&conn, root)
+                                    .ok()
+                                    .and_then(|c| c.reply().ok())
+                                    .map(|p| (p.root_x as i32, p.root_y as i32))
+                                {
+                                    let is_click = match last_button_press.take() {
+                                        Some((btn, down)) if btn == ev.detail => {
+                                            (pos.0 - down.0).abs() < 6
+                                                && (pos.1 - down.1).abs() < 6
+                                        }
+                                        _ => true,
+                                    };
+                                    if is_click {
+                                        let _ = tx.send(SelectionEvent::OutsideClick { pos });
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -524,26 +555,5 @@ mod tests {
         let started = Instant::now();
         assert_eq!(get_current_selection(), Some("Hello world".into()));
         assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn same_word_is_allowed_after_repeat_window() {
-        let mut dedup = SelectionDedup::default();
-        let start = Instant::now();
-        assert!(dedup.accept("你好", start));
-        assert!(!dedup.accept("你好", start + Duration::from_millis(499)));
-        // Rejected duplicates do not extend the window.
-        assert!(dedup.accept("你好", start + Duration::from_millis(500)));
-        assert!(!dedup.accept("你好", start + Duration::from_millis(501)));
-        assert!(dedup.accept("世界", start + Duration::from_millis(502)));
-    }
-
-    #[test]
-    fn clearing_allows_immediate_reselection() {
-        let mut dedup = SelectionDedup::default();
-        let now = Instant::now();
-        assert!(dedup.accept("同词", now));
-        dedup.clear();
-        assert!(dedup.accept("同词", now + Duration::from_millis(1)));
     }
 }

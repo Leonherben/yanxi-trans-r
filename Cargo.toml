@@ -1,6 +1,6 @@
 [package]
 name = "yanxi-trans-r"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2024"
 rust-version = "1.85"
 authors = ["LeonHerben <herberten16@gmail.com>"]
@@ -32,3 +32,21 @@ tokio = { version = "1.43.0", features = ["full"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.14.0", features = ["all-extensions"] }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
