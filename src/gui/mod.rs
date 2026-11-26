@@ -592,114 +592,139 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     // 5. 注册全局快捷键监听 (默认 Alt + Q，支持动态热重载)
+    // Offload selection capture & state updates from the native hotkey loop so UIA/clipboard
+    // fallback never stalls WM_HOTKEY message delivery.
+    let (hk_tx, hk_rx) = std::sync::mpsc::sync_channel::<()>(2);
+    let state_hotkey = Arc::clone(&state);
+    let _ = std::thread::Builder::new()
+        .name("yanxi-hotkey-worker".into())
+        .spawn(move || {
+            while hk_rx.recv().is_ok() {
+                while hk_rx.try_recv().is_ok() {}
+                let selection = crate::selection::get_current_selection();
+                #[cfg(windows)]
+                let win32_cursor_area = cursor_pos_win32().map(|(px, py)| {
+                    let (ox, oy, s_w, s_h) = monitor_work_area_for_point(px, py);
+                    (px, py, ox, oy, s_w, s_h)
+                });
+
+                let snapshot = if let Ok(mut lock) = state_hotkey.lock() {
+                    apply_hotkey_selection(&mut lock, selection.as_deref());
+                    let mut x11_move: Option<(u32, (f32, f32), (f32, f32))> = None;
+                    let mut x11_raise: Option<u32> = None;
+                    if lock.is_visible && !lock.is_pinned {
+                        #[cfg(target_os = "linux")]
+                        {
+                            if let Ok((conn, screen_num)) = x11rb::connect(None) {
+                                use x11rb::protocol::xproto::ConnectionExt;
+                                let root = conn.setup().roots[screen_num].root;
+                                let s_w = conn.setup().roots[screen_num].width_in_pixels as f32;
+                                let s_h = conn.setup().roots[screen_num].height_in_pixels as f32;
+                                lock.screen_size = (s_w, s_h);
+                                if let Ok(cookie) = conn.query_pointer(root) {
+                                    if let Ok(reply) = cookie.reply() {
+                                        let (px, py) = (reply.root_x as i32, reply.root_y as i32);
+                                        lock.cursor_pos = (px, py);
+                                        let (win_w, win_h) = lock.window_size;
+                                        let target_pos = SharedPopupState::compute_target_pos(
+                                            px, py, win_w, win_h, s_w, s_h,
+                                        );
+                                        lock.window_pos = Some(target_pos);
+                                        if let Some(win) = lock.x11_window {
+                                            x11_move = Some((win, target_pos, (win_w, win_h)));
+                                        }
+                                    }
+                                }
+                            }
+                            x11_raise = lock.x11_window;
+                        }
+                        #[cfg(windows)]
+                        {
+                            if let Some((px, py, ox, oy, s_w, s_h)) = win32_cursor_area {
+                                lock.screen_origin = (ox, oy);
+                                lock.screen_size = (s_w, s_h);
+                                lock.cursor_pos = (px, py);
+                                let (win_w, win_h) = lock.window_size;
+                                let target_pos = SharedPopupState::compute_target_pos_in_bounds(
+                                    px,
+                                    py,
+                                    win_w,
+                                    win_h,
+                                    (ox, oy, s_w, s_h),
+                                );
+                                lock.window_pos = Some(target_pos);
+                            }
+                        }
+                        lock.should_update_pos = true;
+                    }
+                    if lock.is_visible {
+                        lock.pending_win32_show = Some(true);
+                    }
+                    Some((
+                        lock.is_visible,
+                        lock.win32_hwnd,
+                        x11_move,
+                        x11_raise,
+                        lock.ctx.clone(),
+                    ))
+                } else {
+                    None
+                };
+
+                if let Some((is_visible, win32_hwnd, x11_move, x11_raise, ctx)) = snapshot {
+                    #[cfg(target_os = "linux")]
+                    {
+                        if let Some((win, pos, size)) = x11_move {
+                            move_resize_x11(
+                                win,
+                                pos.0 as i32,
+                                pos.1 as i32,
+                                size.0 as u32,
+                                size.1 as u32,
+                            );
+                        }
+                        if let Some(win) = x11_raise {
+                            raise_window_x11(win);
+                        }
+                    }
+                    #[cfg(windows)]
+                    if is_visible {
+                        if let Some(hwnd) = win32_hwnd {
+                            wake_win32_window(hwnd);
+                        }
+                    }
+                    let _ = (is_visible, win32_hwnd, x11_move, x11_raise);
+                    if let Some(ctx) = ctx {
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        });
+
     let (tx_hotkey, rx_hotkey) = std::sync::mpsc::channel::<String>();
     {
         let mut lock = state.lock().unwrap();
         lock.tx_hotkey = Some(tx_hotkey);
     }
-    let state_hotkey = Arc::clone(&state);
     let state_hotkey_status = Arc::clone(&state);
     let initial_hotkey = config.selection.hotkey.clone();
     start_global_hotkey_listener(
         initial_hotkey,
         rx_hotkey,
         move || {
-            // Read only the current selection, never a previously copied clipboard item.
-            // The selection helper has a bounded wait and runs outside the state lock.
-            let selection = crate::selection::get_current_selection();
-            #[cfg(windows)]
-            let win32_cursor_area = cursor_pos_win32().map(|(px, py)| {
-                let (ox, oy, s_w, s_h) = monitor_work_area_for_point(px, py);
-                (px, py, ox, oy, s_w, s_h)
-            });
-
-            let snapshot = if let Ok(mut lock) = state_hotkey.lock() {
-                apply_hotkey_selection(&mut lock, selection.as_deref());
-                let mut x11_move: Option<(u32, (f32, f32), (f32, f32))> = None;
-                let mut x11_raise: Option<u32> = None;
-                if lock.is_visible && !lock.is_pinned {
-                    #[cfg(target_os = "linux")]
-                    {
-                        if let Ok((conn, screen_num)) = x11rb::connect(None) {
-                            use x11rb::protocol::xproto::ConnectionExt;
-                            let root = conn.setup().roots[screen_num].root;
-                            let s_w = conn.setup().roots[screen_num].width_in_pixels as f32;
-                            let s_h = conn.setup().roots[screen_num].height_in_pixels as f32;
-                            lock.screen_size = (s_w, s_h);
-                            if let Ok(cookie) = conn.query_pointer(root) {
-                                if let Ok(reply) = cookie.reply() {
-                                    let (px, py) = (reply.root_x as i32, reply.root_y as i32);
-                                    lock.cursor_pos = (px, py);
-                                    let (win_w, win_h) = lock.window_size;
-                                    let target_pos = SharedPopupState::compute_target_pos(
-                                        px, py, win_w, win_h, s_w, s_h,
-                                    );
-                                    lock.window_pos = Some(target_pos);
-                                    if let Some(win) = lock.x11_window {
-                                        x11_move = Some((win, target_pos, (win_w, win_h)));
-                                    }
-                                }
-                            }
-                        }
-                        x11_raise = lock.x11_window;
-                    }
-                    #[cfg(windows)]
-                    {
-                        if let Some((px, py, ox, oy, s_w, s_h)) = win32_cursor_area {
-                            lock.screen_origin = (ox, oy);
-                            lock.screen_size = (s_w, s_h);
-                            lock.cursor_pos = (px, py);
-                            let (win_w, win_h) = lock.window_size;
-                            let target_pos = SharedPopupState::compute_target_pos_in_bounds(
-                                px,
-                                py,
-                                win_w,
-                                win_h,
-                                (ox, oy, s_w, s_h),
-                            );
-                            lock.window_pos = Some(target_pos);
-                        }
-                    }
-                    lock.should_update_pos = true;
-                }
-                if lock.is_visible {
-                    lock.pending_win32_show = Some(true);
-                }
-                Some((
-                    lock.is_visible,
-                    lock.win32_hwnd,
-                    x11_move,
-                    x11_raise,
-                    lock.ctx.clone(),
-                ))
-            } else {
-                None
-            };
-
-            if let Some((is_visible, win32_hwnd, x11_move, x11_raise, ctx)) = snapshot {
-                #[cfg(target_os = "linux")]
-                {
-                    if let Some((win, pos, size)) = x11_move {
-                        move_resize_x11(win, pos.0 as i32, pos.1 as i32, size.0 as u32, size.1 as u32);
-                    }
-                    if let Some(win) = x11_raise {
-                        raise_window_x11(win);
-                    }
-                }
-                #[cfg(windows)]
-                if is_visible {
-                    if let Some(hwnd) = win32_hwnd {
-                        wake_win32_window(hwnd);
-                    }
-                }
-                let _ = (is_visible, win32_hwnd, x11_move, x11_raise);
-                if let Some(ctx) = ctx {
-                    ctx.request_repaint();
-                }
-            }
+            let _ = hk_tx.try_send(());
         },
         move |ok, message| {
             println!("[Yanxi Hotkey] {message}");
+            #[cfg(windows)]
+            {
+                let tip = if ok {
+                    "言蹊翻译（已启用全局热键）"
+                } else {
+                    "言蹊翻译（热键不可用，右键打开设置）"
+                };
+                tray_win32::update_tooltip(tip);
+            }
             if let Ok(mut lock) = state_hotkey_status.lock() {
                 lock.hotkey_feedback = Some((ok, message));
                 lock.request_repaint();

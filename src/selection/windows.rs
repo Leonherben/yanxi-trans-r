@@ -207,12 +207,12 @@ fn read_via_clipboard_fallback(wait_for_modifiers: bool) -> Option<String> {
     }
 
     if wait_for_modifiers {
-        let deadline = Instant::now() + Duration::from_millis(200);
+        let deadline = Instant::now() + Duration::from_millis(250);
         while any_non_ctrl_modifier_down() || key_is_down(VK_CONTROL) {
             if Instant::now() >= deadline {
                 return None;
             }
-            std::thread::sleep(Duration::from_millis(15));
+            std::thread::sleep(Duration::from_millis(10));
         }
     } else if key_is_down(VK_CONTROL)
         || key_is_down(VK_MENU)

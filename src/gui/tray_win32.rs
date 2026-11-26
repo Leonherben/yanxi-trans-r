@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
@@ -30,6 +31,7 @@ struct TrayCallbacks {
 static TRAY_CALLBACKS: Mutex<Option<TrayCallbacks>> = Mutex::new(None);
 static WM_TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static TRAY_HICON: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static TRAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 pub struct TrayHandle {
     hwnd: isize,
@@ -115,6 +117,19 @@ fn add_tray_icon(hwnd: HWND) {
     let nid = build_notify_icon_data(hwnd, hicon, "言蹊翻译 (Alt+Q)");
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+}
+
+pub fn update_tooltip(tip: &str) {
+    let raw_hwnd = TRAY_HWND.load(std::sync::atomic::Ordering::Relaxed);
+    if raw_hwnd == 0 {
+        return;
+    }
+    let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
+    let mut nid = build_notify_icon_data(hwnd, HICON::default(), tip);
+    nid.uFlags = NIF_TIP;
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 }
 
@@ -326,6 +341,7 @@ where
             };
 
             add_tray_icon(hwnd);
+            TRAY_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
             let _ = hwnd_tx.send(hwnd.0 as isize);
 
             let mut msg = MSG::default();
@@ -334,6 +350,7 @@ where
                 DispatchMessageW(&msg);
             }
 
+            TRAY_HWND.store(0, std::sync::atomic::Ordering::Relaxed);
             if !hicon.0.is_null() {
                 let _ = DestroyIcon(hicon);
                 TRAY_HICON.store(0, std::sync::atomic::Ordering::Relaxed);

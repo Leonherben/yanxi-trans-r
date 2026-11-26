@@ -20,6 +20,7 @@ pub struct PopupApp {
     placing: bool,
     active_resize: Option<egui::viewport::ResizeDirection>,
     drag_anchor: Option<((i32, i32), (f32, f32))>,
+    need_win32_style_verify: bool,
 }
 
 impl PopupApp {
@@ -38,6 +39,7 @@ impl PopupApp {
             placing: false,
             active_resize: None,
             drag_anchor: None,
+            need_win32_style_verify: false,
         }
     }
 }
@@ -45,6 +47,18 @@ impl PopupApp {
 impl eframe::App for PopupApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0] // 保证完全无边框透明
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let ops = {
+            let state = Arc::clone(&self.state);
+            let mut lock = match state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            self.prepare_visibility_and_ops(ctx, &mut lock)
+        };
+        execute_post_render_ops(ctx, ops);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -125,9 +139,9 @@ impl PopupApp {
         execute_post_render_ops(ui.ctx(), ops);
     }
 
-    fn render_with_state(
+    fn prepare_visibility_and_ops(
         &mut self,
-        ui: &mut egui::Ui,
+        ctx: &egui::Context,
         lock: &mut SharedPopupState,
     ) -> PostRenderOps {
         let mut ops = PostRenderOps::default();
@@ -138,31 +152,34 @@ impl PopupApp {
             return ops;
         }
 
-        sync_window_level(&mut self.last_pinned, ui.ctx(), lock, &mut ops);
+        sync_window_level(&mut self.last_pinned, ctx, lock, &mut ops);
 
         let pending_show = lock.pending_win32_show.take();
 
         // Window state is stored in physical pixels; one helper owns all conversions.
         if self.last_visible != Some(lock.is_visible) {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Visible(lock.is_visible));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(lock.is_visible));
             self.last_visible = Some(lock.is_visible);
             if lock.is_visible {
                 lock.last_shown_at = Some(std::time::Instant::now());
+                self.need_win32_style_verify = lock.win32_hwnd.is_some();
                 if let Some(hwnd) = lock.win32_hwnd {
                     ops.win32_ensure_borderless = Some(hwnd);
+                    if let Some(pos) = lock.window_pos {
+                        queue_or_apply_geometry(ctx, &mut ops, lock, pos, lock.window_size);
+                    }
                     if !lock.is_pinned || pending_show.is_some() {
                         ops.win32_show = Some((hwnd, lock.is_pinned, pending_show.unwrap_or(false)));
                     }
                 } else if !lock.is_pinned {
                     crate::gui::raise_window(lock.x11_window, None);
                 }
-                ui.ctx().request_repaint();
+                ctx.request_repaint();
                 // Re-arm geometry repair: a remap can resize/move the window again.
                 self.geometry_checks = 0;
                 self.placing = false;
                 let state = Arc::clone(&self.state);
-                let ctx = ui.ctx().clone();
+                let ctx = ctx.clone();
                 // Mapping the native window may resize or move it. Restore the
                 // stored geometry (which is the pinned position when pinned).
                 // Read it again after the delay so a drag during it is not lost.
@@ -191,22 +208,36 @@ impl PopupApp {
                 self.was_focused = false;
                 self.drag_anchor = None;
                 lock.is_popup_open_in_ui = false;
+                self.need_win32_style_verify = false;
             }
         } else if let Some(activate) = pending_show {
             if lock.is_visible {
+                self.need_win32_style_verify = lock.win32_hwnd.is_some();
                 if let Some(hwnd) = lock.win32_hwnd {
                     ops.win32_ensure_borderless = Some(hwnd);
+                    if let Some(pos) = lock.window_pos {
+                        queue_or_apply_geometry(ctx, &mut ops, lock, pos, lock.window_size);
+                    }
                     ops.win32_show = Some((hwnd, lock.is_pinned, activate));
                 }
+                ctx.request_repaint();
             }
+        } else if self.need_win32_style_verify && lock.is_visible {
+            self.need_win32_style_verify = false;
+            ops.win32_ensure_borderless = lock.win32_hwnd;
         }
 
-        if !lock.is_visible {
+        ops
+    }
+
+    fn render_with_state(
+        &mut self,
+        ui: &mut egui::Ui,
+        lock: &mut SharedPopupState,
+    ) -> PostRenderOps {
+        let mut ops = self.prepare_visibility_and_ops(ui.ctx(), lock);
+        if ops.close_viewport || !lock.is_visible {
             return ops;
-        }
-
-        if let Some(hwnd) = lock.win32_hwnd {
-            ops.win32_ensure_borderless = Some(hwnd);
         }
 
         let focused = ui.input(|i| i.focused);
@@ -2000,5 +2031,21 @@ mod layout_tests {
                 .any(|(value, rect)| value == "复制译文" && bounds.contains_rect(*rect))
         );
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn hidden_popup_restores_visibility_via_logic_path() {
+        let config = AppConfig::default();
+        let state = Arc::new(Mutex::new(SharedPopupState::new(&config)));
+        let mut app = PopupApp::new(Arc::clone(&state), config);
+        app.last_visible = Some(false);
+        let ctx = egui::Context::default();
+        {
+            let mut lock = state.lock().unwrap();
+            lock.is_visible = true;
+            let ops = app.prepare_visibility_and_ops(&ctx, &mut lock);
+            assert!(!ops.close_viewport);
+        }
+        assert_eq!(app.last_visible, Some(true));
     }
 }
