@@ -615,8 +615,8 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             let snapshot = if let Ok(mut lock) = state_hotkey.lock() {
                 apply_hotkey_selection(&mut lock, selection.as_deref());
-                let mut x11_move = None;
-                let mut x11_raise = None;
+                let mut x11_move: Option<(u32, (f32, f32), (f32, f32))> = None;
+                let mut x11_raise: Option<u32> = None;
                 if lock.is_visible && !lock.is_pinned {
                     #[cfg(target_os = "linux")]
                     {
