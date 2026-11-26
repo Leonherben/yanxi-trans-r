@@ -235,7 +235,7 @@ impl SharedPopupState {
         self.last_outside_dismiss_at = None;
         self.outside_dismiss_seq = self.outside_dismiss_seq.wrapping_add(1);
         println!(
-            "[Yanxi GUI] {}",
+            "[Yanxi] {}",
             if self.is_pinned {
                 "窗口已固定在最上方"
             } else {

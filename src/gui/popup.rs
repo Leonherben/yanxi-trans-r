@@ -214,7 +214,7 @@ impl PopupApp {
 
                         self.placing = true;
                         println!(
-                            "[Yanxi GUI] 修正窗口几何: {:?}@{:?} -> {:?}@{:?}",
+                            "[Yanxi] 修正窗口几何: {:?}@{:?} -> {:?}@{:?}",
                             actual_size, actual_pos, lock.window_size, pos
                         );
                         // A maximized/fullscreen WM state ignores explicit sizes.

@@ -51,22 +51,19 @@ jobs:
       - name: Prepare Artifact (Linux)
         if: runner.os == 'Linux'
         run: |
-          strip target/${{ matrix.target }}/release/yanxi-cli
-          strip target/${{ matrix.target }}/release/yanxi-gui
-          cp target/${{ matrix.target }}/release/yanxi-cli ./yanxi-cli-linux-x86_64
-          cp target/${{ matrix.target }}/release/yanxi-gui ./yanxi-gui-linux-x86_64
+          strip target/${{ matrix.target }}/release/yanxi
+          cp target/${{ matrix.target }}/release/yanxi ./yanxi-linux-x86_64
 
       - name: Prepare Artifact (Windows)
         if: runner.os == 'Windows'
         run: |
-          Copy-Item target/${{ matrix.target }}/release/yanxi-cli.exe ./yanxi-cli-windows-x86_64.exe
-          Copy-Item target/${{ matrix.target }}/release/yanxi-gui.exe ./yanxi-gui-windows-x86_64.exe
+          Copy-Item target/${{ matrix.target }}/release/yanxi.exe ./yanxi-windows-x86_64.exe
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            yanxi-cli-*
-            yanxi-gui-*
+            yanxi-linux-*
+            yanxi-windows-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -78,7 +78,7 @@ impl OpenAICompatibleTranslator {
         if self.config.api_key.trim().is_empty() {
             return Ok(TranslationResult::error(
                 &req.text,
-                format!("未配置 API Key，请先运行 `yanxi-cli --set-key {} <KEY>` 进行配置", self.config.name),
+                format!("未配置 API Key，请先在设置页填写 {} 的密钥", self.config.name),
                 &self.config.name,
             ));
         }

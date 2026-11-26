@@ -1,21 +1,17 @@
 # 言蹊翻译 (Yanxi-Trans-R)
 
-> 版本 **0.5.8**，在 0.5.7 基础上补全 Windows 端支持，重构图钉置顶/自动收起与拖拽体验，并将默认取词模式升级为「按需划词」。
->
-> - **默认「按需划词」**：平时划选文字静默不打扰；选中文字后按 `Alt+Q` 唤醒浮窗并翻译，浮窗打开期间继续双击/划选新词自动连续翻译；点击空白处自动收起并回到静默状态（可在设置页切换为 `划选翻译` 或 `手动模式`）。
-> - **主流图钉（Pin）体验**：未 Pin 时为普通窗口层级且点空白/失焦自动收起（设置页与下拉框豁免）；开启 Pin 后真正保持在所有窗口最上方（`AlwaysOnTop`）、位置固定不随光标移动、点外部不关闭，且支持重启恢复位置与尺寸。
-> - **顺滑拖拽**：桌面软件拖拽改为屏幕绝对坐标锚点与线程本地 X11 连接复用，消除拖动手感卡顿。
-> - **Windows 端补全**：支持 Windows 命名管道单实例唤醒、`RegisterHotKey` 全局热键、UI Automation 优先取词与剪贴板保护回退、多屏工作区定位与 `mciSendStringW` 语音播放。
-> - **基础能力延续**：主界面仅保留语言、原文、译文和常用操作（服务商与密钥统一在设置页管理）；按实际汉字覆盖选择 CJK 字体；按 Unicode 字符计数（最多 3000 字）；保留请求去重/取消、SQLite 缓存与损坏配置备份。
+> 版本 **0.5.9**，简化为单一桌面程序 `yanxi`（移除独立 CLI 与 `-gui` 命名后缀），新增「下自成蹊」应用 Logo（覆盖桌面/开始菜单、窗口图标及 Windows 可执行文件图标），并修复 Windows 环境下中文字体字形探测误判的问题。
 
 <div align="center">
+
+<img src="assets/icon.svg" alt="言蹊翻译 Logo" width="96" height="96" />
 
 [![CI](https://github.com/Leonherben/yanxi-trans-r/actions/workflows/ci.yml/badge.svg)](https://github.com/Leonherben/yanxi-trans-r/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-brightgreen.svg)]()
 [![Rust Version](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)]()
 
-**言蹊翻译 (Yanxi-Trans-R)** 是一款使用纯 Rust 打造的超轻量、极速跨平台划词翻译引擎与终端生产力工具。  
+**言蹊翻译 (Yanxi-Trans-R)** 是一款使用纯 Rust 打造的超轻量、极速跨平台划词翻译悬浮窗工具。  
 由原有 Python/PySide6 版本（[yanxi-trans](https://github.com/Leonherben/yanxi-trans.git)）重构演进而来，追求极致的启动响应、超低内存开销以及开箱即用的免配置体验。
 
 </div>
@@ -24,26 +20,25 @@
 
 ## 🌟 核心特性
 
-- ⚡ **极致轻量 & 零依赖**：单文件原生纯 Rust 可执行程序，无需 Python 环境及沉重的 Qt/PySide6 依赖库，相较于原版内存下降 **80%+**。
-- 🪟 **原生桌面极简悬浮弹窗 (`yanxi-gui`)**：基于 `eframe`/`egui` 打造的极简浅色悬浮窗，无焦点窃取打扰，智能跟随光标定位并具备屏幕边缘防溢出。
-- 🎯 **X11 XFixes 全局无感划词监听**：彻底摒弃传统 24 小时低级鼠标钩子轮询，日常 **完全零 CPU 占用**，在任意应用中选词高亮即时触发。
-- 🌐 **微软官方免 Key 极速通道**：内置高拟真 Bing/Edge 网页端自适应动态会话签名机制，无需申请任何 API Key 即可无限免费体验极速翻译（支持注音/拼音与语种自动识别）。
-- 🤖 **兼容大模型生态**：原生支持 OpenAI、DeepSeek、Moonshot 等任何兼容 `/chat/completions` 协议的大模型，支持自定义 System Prompt。
-- 📄 **学术双栏 PDF 跨行断词自动修复**：智能识别并修复论文双栏排版中因分行产生的带连字符截断词（例如 `convo-\n lutional` 自动还原为 `convolutional`）。
-- ⚡ **毫秒级 SQLite 本地持久化缓存**：零开销本地哈希缓存，命中翻译直接秒开（~0ms 响应），且 **100% 兼容** Python 原版缓存数据库规范，无缝迁移。
-- 🔄 **管道与终端交互 REPL**：支持标准输入管道（例如 `echo "text" | yanxi-cli` 或配合 `xclip`）、单次翻译与连续交互式命令行模式。
+- ⚡ **极致轻量 & 零依赖**：单文件原生纯 Rust 可执行程序 `yanxi`，无需 Python 环境及 Qt/PySide6 依赖库。
+- 🪟 **原生桌面极简悬浮弹窗**：基于 `eframe`/`egui` 打造的极简浅色悬浮窗，默认「按需划词」模式（平时划选静默不打扰，`Alt+Q` 唤醒后划选连续翻译，点空白处自动收起），同时支持「划选翻译」与「手动模式」。
+- 📌 **图钉置顶与顺滑拖拽**：未 Pin 时为普通窗口层级，点击外部或失焦自动收起；开启 Pin 后真正置顶（`AlwaysOnTop`）并固定位置与尺寸，重启自动恢复。
+- 🎯 **零轮询全局取词**：Linux 基于 X11 XFixes 事件驱动；Windows 支持 UI Automation 优先取词与保护性剪贴板回退。
+- 🌐 **微软官方免 Key 极速通道 + 兼容大模型**：开箱即用走微软网页通道（支持音标与自动语种识别），并在设置页内支持 DeepSeek、OpenAI、智谱 GLM、本地 Ollama 等任意 OpenAI 兼容接口。
+- 📄 **学术双栏 PDF 跨行断词自动修复**：自动合并双栏论文复制产生的连字符跨行断词（如 `convo-\n lutional` → `convolutional`）。
+- ⚡ **毫秒级 SQLite 本地缓存**：命中翻译 ~0ms 响应，表结构与原版完全兼容。
 
 ---
 
 ## 🚀 快速上手
 
-### 1. 环境依赖
+### 1. 环境依赖（Linux X11）
 
-运行时（Linux X11）：
+运行时可选依赖：
 
 - `xsel`：部分应用不按 ICCCM 返回选区时的回退取词（可选）
 - GStreamer（`gst-launch-1.0`）、PipeWire（`pw-play`）、PulseAudio（`paplay`）、`mpv` 任一即可用于发音
-- 中文字体：Noto Sans CJK、文泉驿或系统自带 CJK 字体
+- 中文字体：Noto Sans CJK、文泉驿、HarmonyOS Sans 等任意系统中文字体
 
 构建依赖（Debian/Ubuntu）：
 
@@ -65,80 +60,10 @@ sudo dnf install gcc make pkg-config libX11-devel libxkbcommon-devel \
 git clone https://github.com/Leonherben/yanxi-trans-r.git
 cd yanxi-trans-r
 bash build.sh      # 检查依赖并 cargo build --release
-bash install.sh    # 安装到 ~/.local/bin 并注册桌面入口
+bash install.sh    # 安装 ~/.local/bin/yanxi、应用图标与桌面快捷方式
 ```
 
-安装后运行 `yanxi-gui`，按 `Alt + Q` 呼出/收起悬浮窗。首次使用默认走微软免 Key 通道；如需切换大模型，打开设置填写 API Key。
-
-### 3. 基本使用
-
-#### 直接翻译
-```bash
-# 翻译英文词组
-yanxi-cli "convolutional neural network"
-
-# 自动处理学术 PDF 双栏复制产生的跨行断词
-yanxi-cli "convo-
-  lutional neural network"
-```
-
-#### 管道输入 (配合剪贴板 / 脚本)
-```bash
-# 管道输入
-echo "transfer learning" | yanxi-cli
-
-# Linux X11 配合 xclip 快速翻译选中内容
-xclip -o | yanxi-cli
-```
-
-#### 连通性测试
-```bash
-yanxi-cli --test
-```
-
-#### 查看与管理提供商
-```bash
-# 查看所有已配置的服务提供商
-yanxi-cli --list-providers
-
-# 设置 DeepSeek API Key
-yanxi-cli --set-key deepseek sk-xxxxxxxxxxxxxxxxxxxx
-
-# 临时切换使用 DeepSeek 翻译
-yanxi-cli -p deepseek "attention is all you need"
-
-# 设置默认提供商
-yanxi-cli --set-provider deepseek
-```
-
-#### 启动桌面悬浮弹窗 (GUI 模式)
-```bash
-# 启动桌面常驻无感划词悬浮窗 (划选文字自动弹出并翻译)
-yanxi-gui
-
-# 或通过 CLI 启动 GUI 模式
-yanxi-cli -g
-```
-
-#### 桌面终端划词监听模式 (CLI Watch)
-```bash
-# 在终端中实时监控划词并输出
-yanxi-cli -w
-```
-
-#### 终端交互 REPL 模式
-```bash
-yanxi-cli -i
-```
-
-#### 清空或绕过本地缓存
-```bash
-# 强制跳过缓存直接调用接口
-yanxi-cli --no-cache "transformer architecture"
-
-# 清空本地缓存数据库
-yanxi-cli --clear-cache
-```
+安装后可直接从开始菜单点击「言蹊翻译」或运行 `yanxi` 启动，按 `Alt + Q` 呼出/收起悬浮窗。首次使用默认走微软免 Key 通道；如需切换大模型，点击右上角 `⚙` 进入设置页填写 API Key。
 
 ---
 
@@ -176,40 +101,6 @@ yanxi-cli --clear-cache
   }
 }
 ```
-
----
-
-## 🗺️ 路线图 (Roadmap)
-
-- [x] **Phase 1: 核心引擎与 CLI**
-  - [x] 微软 Edge 免 Key 翻译与 Azure 官方专线双模支持
-  - [x] OpenAI 兼容通用大模型 API 支持
-  - [x] SQLite 本地缓存引擎与 Python 版双向兼容
-  - [x] 学术论文 PDF 跨行断词自动修复
-  - [x] 现代化 CLI 终端工具 (`yanxi-cli`)
-- [x] **Phase 2: 桌面全局划词监听与选区捕获**
-  - [x] 基于 X11 XFixes 协议的异步选区变动监听 (零轮询、零 CPU 占用)
-  - [x] 鼠标指针屏幕绝对坐标 `(x, y)` 毫秒级精准捕获
-  - [x] 左键连续拖拽物理消抖与重复选词抑制机制
-  - [x] Windows 跨平台选区抽象层
-  - [x] CLI 划词监听守护运行模式 (`yanxi-cli -w`)
-- [x] **Phase 3: 超轻量悬浮翻译弹窗**
-  - [x] 基于 `eframe`/`egui` 打造的高性能无焦点窃取悬浮窗 (`yanxi-gui`)
-  - [x] 光标跟随动态定位与屏幕边缘防溢出翻转
-  - [x] 多平台中文字体自适应探测与渲染（优先加载系统 HarmonyOS Sans / Noto Sans CJK / 微软雅黑 / 苹方，完美杜绝豆腐方块乱码）
-  - [x] 极简浅色界面、拼音注音、一键复制与图钉固定
-  - [x] 内存常驻大幅降低至 ~20MB，运行响应如丝顺滑
-- [x] **Phase 4: 全功能深度对齐与跨平台演进 (v0.5.8 当前最新版本)**
-  - [x] **可交互查词输入框**：原文区域支持手动打字、粘贴、修改，按回车（`Enter`）或点击“翻译”即时查词，带一键“清空”与字符计数
-  - [x] **引擎统一在设置中切换**：⚙ 设置面板选择微软 / DeepSeek / OpenAI / 智谱 GLM / 本地 Ollama，切换后自动重译
-  - [x] **双语言就地切换**：顶部源语言（含自动检测）与目标语言双下拉（中/英/日/韩/法/德/西/俄），支持 `⇄` 一键对调互换
-  - [x] **三大取词模式系统**：默认“按需划词”（平时静默，`Alt+Q` 唤醒后划选自动连续翻译，点空白收起），同时支持“划选翻译”与“手动模式”，均在设置面板内切换
-  - [x] **图钉置顶与自动收起**：未 Pin 点外部/失焦自动收起；Pin 后真正保持在所有窗口最上方、固定位置不跟光标且重启记忆
-  - [x] **Windows 端完整适配**：支持命名管道单实例唤醒、`RegisterHotKey` 热键、UI Automation 优先取词与保护性剪贴板回退、多屏工作区定位与 `mciSendStringW` 发音
-  - [x] **图形可视化设置中心 (`⚙`)**：浮窗内嵌服务商配置面板，支持引擎切换、API Key 防窥查看、参数修改与“⚡ 测试连通性”
-  - [x] **单实例运行保护 (IPC Lock)**：Linux Unix Socket / Windows 命名管道互斥锁，重复运行自动唤起现有悬浮窗
-  - [x] **全局原生热键**：`Alt + Q` 全局呼出/收起悬浮窗（可在设置中自定义），`Esc` 随时快速收起
-  - [x] **大模型生态预设**：新增智谱 GLM (`glm-4-flash`) 与 本地 Ollama (`qwen2.5:1.5b`) 默认预设
 
 ---
 

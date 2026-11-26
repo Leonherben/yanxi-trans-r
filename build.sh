@@ -24,6 +24,5 @@ cargo build --release
 
 echo
 echo "构建完成："
-echo "  target/release/yanxi-cli"
-echo "  target/release/yanxi-gui"
+echo "  target/release/yanxi"
 echo "运行 ./install.sh 安装到 ~/.local/bin"

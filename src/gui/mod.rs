@@ -360,6 +360,11 @@ pub fn apply_window_geometry(
     ));
 }
 
+pub fn load_app_icon() -> Option<Arc<eframe::egui::IconData>> {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon.png")).ok()?;
+    Some(Arc::new(icon))
+}
+
 pub fn default_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
     let w = (screen_w * 0.30).clamp(420.0, 760.0).round();
     let h = (screen_h * 0.35).clamp(300.0, 560.0).round();
@@ -368,10 +373,10 @@ pub fn default_window_size(screen_w: f32, screen_h: f32) -> (f32, f32) {
 
 pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 1. 单实例进程保护 (Single Instance Lock)
-    let instance_check = match SingleInstance::check("yanxi-gui") {
+    let instance_check = match SingleInstance::check("yanxi") {
         Ok(check) => check,
         Err(e) => {
-            eprintln!("[Yanxi GUI] ⚠️ 进程锁初始化提示: {e}");
+            eprintln!("[Yanxi] ⚠️ 进程锁初始化提示: {e}");
             return Ok(());
         }
     };
@@ -379,7 +384,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut single_instance = match instance_check {
         InstanceCheck::Primary(inst) => inst,
         InstanceCheck::AlreadyRunning => {
-            println!("[Yanxi GUI] ⚡ 已存在正在运行的言蹊翻译实例，已发送指令唤醒现有悬浮窗。");
+            println!("[Yanxi] ⚡ 已存在正在运行的言蹊翻译实例，已发送指令唤醒现有悬浮窗。");
             return Ok(());
         }
     };
@@ -405,7 +410,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 4. 注册单实例唤醒监听
     let state_ipc = Arc::clone(&state);
     single_instance.listen_activations(move || {
-        println!("[Yanxi GUI] 🔔 收到外部进程激活唤醒指令");
+        println!("[Yanxi] 🔔 收到外部进程激活唤醒指令");
         if let Ok(mut lock) = state_ipc.lock() {
             lock.mark_shown(std::time::Instant::now());
             lock.should_update_pos = true;
@@ -521,7 +526,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("[Yanxi GUI] 无法创建 Tokio 异步运行时: {e}");
+                    eprintln!("[Yanxi] 无法创建 Tokio 异步运行时: {e}");
                     return;
                 }
             };
@@ -583,18 +588,24 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         eframe::egui::WindowLevel::Normal
     };
 
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([start_size.0, start_size.1])
+        .with_min_inner_size([380.0, 220.0])
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_window_level(initial_level)
+        .with_active(false)
+        .with_taskbar(false)
+        .with_resizable(true)
+        .with_app_id("yanxi")
+        .with_window_type(eframe::egui::X11WindowType::Utility);
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([start_size.0, start_size.1])
-            .with_min_inner_size([380.0, 220.0])
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_window_level(initial_level)
-            .with_active(false)
-            .with_taskbar(false)
-            .with_resizable(true)
-            .with_window_type(eframe::egui::X11WindowType::Utility),
+        viewport,
         ..Default::default()
     };
 
@@ -876,7 +887,7 @@ async fn handle_worker_events(
                             win_h,
                             (s_origin.0, s_origin.1, s_size.0, s_size.1),
                         );
-                        println!("[Yanxi GUI] 划词事件触发 @ ({}, {}): \"{}\"", pos.0, pos.1, text);
+                        println!("[Yanxi] 划词事件触发 @ ({}, {}): \"{}\"", pos.0, pos.1, text);
 
                         let (provider_name, source_lang, target_lang) = {
                             let mut lock = match state.lock() {
@@ -1010,7 +1021,7 @@ async fn handle_worker_events(
             Some(cmd) = rx_cmd.recv() => {
                 match cmd {
                     GuiCommand::Translate { text, source_lang, target_lang, provider } => {
-                        println!("[Yanxi GUI] 交互翻译请求: \"{}\" -> [{} ({})]", text, provider, target_lang);
+                        println!("[Yanxi] 交互翻译请求: \"{}\" -> [{} ({})]", text, provider, target_lang);
                         next_request_id += 1;
                         let req_id = next_request_id;
                         if let Ok(mut lock) = state.lock() {
@@ -1038,7 +1049,7 @@ async fn handle_worker_events(
                         }));
                     }
                     GuiCommand::TestProvider { provider_name, provider_config } => {
-                        println!("[Yanxi GUI] 连通性测试: [{}]", provider_name);
+                        println!("[Yanxi] 连通性测试: [{}]", provider_name);
                         let state_task = Arc::clone(&state);
                         tokio::spawn(async move {
                             let translator = create_translator(&provider_config);
@@ -1057,7 +1068,7 @@ async fn handle_worker_events(
                         });
                     }
                     GuiCommand::PlayTts { text, accent } => {
-                        println!("[Yanxi GUI] 播放发音: \"{}\" ({:?})", text, accent);
+                        println!("[Yanxi] 播放发音: \"{}\" ({:?})", text, accent);
                         tokio::spawn(async move {
                             crate::tts::play_pronunciation(&text, accent).await;
                         });
@@ -1065,7 +1076,7 @@ async fn handle_worker_events(
                     GuiCommand::SaveConfig(new_cfg) => {
                         let _ = new_cfg.save();
                         config = new_cfg;
-                        println!("[Yanxi GUI] 💾 配置已成功保存至磁盘");
+                        println!("[Yanxi] 💾 配置已成功保存至磁盘");
                     }
                 }
             }
@@ -1099,7 +1110,7 @@ async fn perform_translation(
 
     // 1. 本地缓存秒开
     if let Some(cached) = cache.get(&req, &provider_name) {
-        println!("[Yanxi GUI] 本地缓存命中: \"{}\"", cached.translated_text);
+        println!("[Yanxi] 本地缓存命中: \"{}\"", cached.translated_text);
         publish_status(&state, request_id, TranslationStatus::Success(cached));
         return;
     }
@@ -1124,21 +1135,21 @@ async fn perform_translation(
     let outcome = translator.translate(&req).await;
 
     if !is_latest(&state, request_id) {
-        println!("[Yanxi GUI] 丢弃过期翻译结果 (请求 #{request_id})");
+        println!("[Yanxi] 丢弃过期翻译结果 (请求 #{request_id})");
         return;
     }
 
     match outcome {
         Ok(res) if res.is_success() => {
             println!(
-                "[Yanxi GUI] 翻译完成 [{:.0}ms]: \"{}\"",
+                "[Yanxi] 翻译完成 [{:.0}ms]: \"{}\"",
                 res.latency_ms, res.translated_text
             );
             cache.put(&res);
             publish_status(&state, request_id, TranslationStatus::Success(res));
         }
         Ok(res) => {
-            eprintln!("[Yanxi GUI] 翻译失败: {}", res.translated_text);
+            eprintln!("[Yanxi] 翻译失败: {}", res.translated_text);
             publish_status(
                 &state,
                 request_id,
@@ -1149,7 +1160,7 @@ async fn perform_translation(
             );
         }
         Err(e) => {
-            eprintln!("[Yanxi GUI] 请求异常: {e}");
+            eprintln!("[Yanxi] 请求异常: {e}");
             publish_status(
                 &state,
                 request_id,
@@ -1253,5 +1264,13 @@ mod tests {
         assert_eq!(default_window_size(2560.0, 1440.0), (760.0, 504.0));
         assert_eq!(default_window_size(3440.0, 1440.0), (760.0, 504.0));
         assert_eq!(default_window_size(800.0, 600.0), (420.0, 300.0));
+    }
+
+    #[test]
+    fn load_app_icon_decodes_embedded_logo() {
+        let icon = load_app_icon().expect("embedded icon.png should decode");
+        assert_eq!(icon.width, 256);
+        assert_eq!(icon.height, 256);
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 }

@@ -1,25 +1,19 @@
 [package]
 name = "yanxi-trans-r"
-version = "0.5.8"
+version = "0.5.9"
 edition = "2024"
 rust-version = "1.85"
 authors = ["LeonHerben <herberten16@gmail.com>"]
 description = "High-performance, ultra-lightweight selection translation tool in Rust"
 license = "MIT"
-repository = "https://github.com/LeonHerben/yanxi-trans-r"
+repository = "https://github.com/Leonherben/yanxi-trans-r"
 
 [[bin]]
-name = "yanxi-cli"
+name = "yanxi"
 path = "src/main.rs"
-
-[[bin]]
-name = "yanxi-gui"
-path = "src/bin/yanxi-gui.rs"
 
 [dependencies]
 arboard = "3.6.1"
-clap = { version = "4.6.7", features = ["derive"] }
-colored = "2.1.0"
 dirs = "5.0.1"
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 regex = "1.11.1"
@@ -28,7 +22,11 @@ rusqlite = { version = "0.33.0", features = ["bundled"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 sha2 = "0.10.8"
+skrifa = { version = "0.44.0", default-features = false }
 tokio = { version = "1.43.0", features = ["full"] }
+
+[build-dependencies]
+winresource = "0.1.34"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.14.0", features = ["all-extensions"] }
